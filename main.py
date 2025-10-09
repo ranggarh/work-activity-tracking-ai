@@ -2,37 +2,72 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
+import csv
 
 model = YOLO("yolov8n-pose.pt")
 
-video_path = "sample-4.mp4"
-cap = cv2.VideoCapture(video_path)
+# Path video
+video_path = "sample-puterako.mp4"
+
+# DEFINISI ZONA WORKSTATION (x1, y1, x2, y2)
+# Format: {zone_id: (x1, y1, x2, y2, "nama_zona")}
+WORKSTATION_ZONES = {
+    # Video Puterako Zone sample-puterako.mp4
+    1: (10, 50, 350, 550, "Workstation A"),
+    2: (450, 50, 750, 550, "Workstation B"),
+    
+    # Sample-1
+    # 1: (150, 100, 650, 450, "Workstation A"),
+    
+    # Tambahkan zona sesuai kebutuhan
+}
+
+
 
 worker_data = {}
-workstation_zones = {}  # {zone_id: (x1, y1, x2, y2)}
-zone_ownership = {}  # {zone_id: person_id} - Siapa yang terakhir di zona ini
-person_to_zone = {}  # {person_id: zone_id} - Mapping person ke zona nya
-track_to_person = {}  # {track_id: person_id} - MEMORY: Track ID pernah jadi person ID apa
+zone_ownership = {}  # {zone_id: person_id}
+person_to_zone = {}  # {person_id: zone_id}
+track_to_person = {}  # {track_id: person_id}
 
 # Keypoints
 HAND_KEYPOINTS = [9, 10]
 SHOULDER_KEYPOINTS = [5, 6]
 HEAD_KEYPOINT = 0
 HIP_KEYPOINTS = [11, 12]
+EAR_KEYPOINTS = [3, 4]
 
 # Thresholds
 ACTIVITY_THRESHOLD = 8
 IDLE_TIMEOUT = 3
 AWAY_TIMEOUT = 2
 VISIBILITY_THRESHOLD = 0.5
-ZONE_MARGIN = 140  # Zona individual per orang
-ZONE_CALIBRATION_FRAMES = 30
-ZONE_OVERLAP_THRESHOLD = 0.6  # 60% overlap baru dianggap zona sama (lebih ketat, tidak mudah merge)
-ZONE_MIN_DISTANCE = 80  # Jarak minimum diperkecil (tidak merge zona yang berdekatan)
-REID_TIMEOUT = 15  # Detik untuk "ingat" orang yang hilang (diperpanjang)
+REID_TIMEOUT = 15
 
-next_person_id = 1  
-next_zone_id = 1
+next_person_id = 1
+
+csv_rows = []
+for zone_id, zone_data in WORKSTATION_ZONES.items():
+    zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+    active = idle = away = 0
+    for data in worker_data.values():
+        if person_to_zone.get(data["zone_id"]) == zone_id or data["zone_id"] == zone_id:
+            if data["status"] == "working":
+                active += 1
+            elif data["status"] == "idle":
+                idle += 1
+            elif data["status"] == "away":
+                away += 1
+    csv_rows.append([zone_name, active, idle, away])
+
+with open("workstation_summary.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["workstation", "Total Active", "Total Idle", "Total Away"])
+    writer.writerows(csv_rows)
+
+print("📁 Summary saved to workstation_summary.csv")
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
 
 def get_person_center(keypoints, visibility):
     """Dapatkan posisi center pekerja"""
@@ -46,136 +81,66 @@ def get_person_center(keypoints, visibility):
         return int(center[0]), int(center[1])
     return None
 
-def calculate_zone_distance(zone1, zone2):
-    """Hitung jarak center antara 2 zona"""
-    x1_1, y1_1, x2_1, y2_1 = zone1
-    x1_2, y1_2, x2_2, y2_2 = zone2
-    
-    # Center points
-    cx1 = (x1_1 + x2_1) / 2
-    cy1 = (y1_1 + y2_1) / 2
-    cx2 = (x1_2 + x2_2) / 2
-    cy2 = (y1_2 + y2_2) / 2
-    
-    return np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
-
-def calculate_zone_overlap(zone1, zone2):
-    """Hitung overlap antara 2 zona (IoU)"""
-    x1_1, y1_1, x2_1, y2_1 = zone1
-    x1_2, y1_2, x2_2, y2_2 = zone2
-    
-    # Intersection
-    x_left = max(x1_1, x1_2)
-    y_top = max(y1_1, y1_2)
-    x_right = min(x2_1, x2_2)
-    y_bottom = min(y2_1, y2_2)
-    
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-    
-    intersection = (x_right - x_left) * (y_bottom - y_top)
-    area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
-    area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
-    union = area1 + area2 - intersection
-    
-    return intersection / union if union > 0 else 0
-
-def find_matching_zone(center, current_zones):
-    """Cari zona yang matching dengan posisi center"""
+def find_zone_by_position(center):
+    """Cari zona berdasarkan posisi center"""
     if center is None:
         return None
     
     x, y = center
-    for zone_id, zone in current_zones.items():
-        x1, y1, x2, y2 = zone
+    for zone_id, zone_data in WORKSTATION_ZONES.items():
+        x1, y1, x2, y2 = zone_data[:4]
         if x1 <= x <= x2 and y1 <= y <= y2:
             return zone_id
     return None
 
-def find_or_create_zone(center, current_time):
-    """Cari zona existing atau buat baru (TIDAK mudah merge)"""
-    global next_zone_id
+def is_in_zone(center, zone_id):
+    """Cek apakah posisi center ada di dalam zona"""
+    if center is None or zone_id is None or zone_id not in WORKSTATION_ZONES:
+        return False
+    
+    x, y = center
+    x1, y1, x2, y2 = WORKSTATION_ZONES[zone_id][:4]
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+def reid_person(track_id, center, current_time):
+    """Re-identify person berdasarkan TRACK ID & ZONA"""
+    global next_person_id
     
     if center is None:
         return None
     
-    x, y = center
-    new_zone = (
-        x - ZONE_MARGIN,
-        y - ZONE_MARGIN,
-        x + ZONE_MARGIN,
-        y + ZONE_MARGIN
-    )
-    
-    # Cek overlap dengan zona existing (hanya merge jika overlap sangat tinggi)
-    for zone_id, existing_zone in workstation_zones.items():
-        overlap = calculate_zone_overlap(new_zone, existing_zone)
-        
-        # Hanya merge jika overlap >60% (hampir identik)
-        if overlap > ZONE_OVERLAP_THRESHOLD:
-            return zone_id
-    
-    # Buat zona baru untuk setiap orang
-    zone_id = next_zone_id
-    next_zone_id += 1
-    workstation_zones[zone_id] = new_zone
-    print(f"📍 Created new zone {zone_id} at position ({x}, {y})")
-    return zone_id
-
-def reid_person(track_id, center, current_time):
-    """Re-identify person berdasarkan TRACK ID MEMORY & ZONA"""
-    global next_person_id
-    
-    if center is None:
-        return track_id
-    
-    # PRIORITAS 1: Cek apakah track ID ini sudah pernah muncul sebelumnya
+    # PRIORITAS 1: Track ID yang sama = person yang sama
     if track_id in track_to_person:
         old_person_id = track_to_person[track_id]
         if old_person_id in worker_data:
-            # Track ID yang sama = orang yang sama!
             return old_person_id
     
-    # PRIORITAS 2: Cari zona yang matching dengan posisi sekarang
-    zone_id = find_matching_zone(center, workstation_zones)
+    # PRIORITAS 2: Cari zona dari posisi
+    zone_id = find_zone_by_position(center)
     
-    # PRIORITAS 3: Jika tidak ada zona matching, coba buat/cari zona
     if zone_id is None:
-        zone_id = find_or_create_zone(center, current_time)
+        return None
     
-    # PRIORITAS 4: Cek apakah zona ini punya owner
-    if zone_id is not None and zone_id in zone_ownership:
+    # PRIORITAS 3: Cek ownership zona
+    if zone_id in zone_ownership:
         old_person_id = zone_ownership[zone_id]
-        
-        # ATURAN: 1 zona = 1 orang, SELALU gunakan person ID yang sudah ada
         if old_person_id in worker_data:
-            person_to_zone[old_person_id] = zone_id
-            # Simpan track ID memory
+            # 1 zona = 1 person
             track_to_person[track_id] = old_person_id
             return old_person_id
     
-    # PRIORITAS 5: Person baru di zona baru
+    # PRIORITAS 4: Person baru di zona ini
     person_id = next_person_id
     next_person_id += 1
     
-    if zone_id is not None:
-        zone_ownership[zone_id] = person_id
-        person_to_zone[person_id] = zone_id
-        print(f"🆕 New worker detected: Person {person_id} at Zone {zone_id}")
-    
-    # Simpan track ID memory
+    zone_ownership[zone_id] = person_id
+    person_to_zone[person_id] = zone_id
     track_to_person[track_id] = person_id
     
-    return person_id
-
-def is_in_zone(center, zone):
-    """Cek apakah posisi center ada di dalam zona"""
-    if center is None or zone is None:
-        return True
+    zone_name = WORKSTATION_ZONES[zone_id][4] if len(WORKSTATION_ZONES[zone_id]) > 4 else f"Zone {zone_id}"
+    print(f"🆕 New worker detected: Person {person_id} at {zone_name}")
     
-    x, y = center
-    x1, y1, x2, y2 = zone
-    return x1 <= x <= x2 and y1 <= y <= y2
+    return person_id
 
 def calculate_activity_score(pose1, pose2, vis1, vis2):
     """Hitung skor aktivitas"""
@@ -216,11 +181,72 @@ def is_valid_detection(visibility):
                         visibility[6] > VISIBILITY_THRESHOLD)
     return head_visible or shoulders_visible
 
+def draw_zones(frame):
+    """Gambar semua zona workstation dan info status/durasi di dalamnya"""
+    current_time = time.time()
+    for zone_id, zone_data in WORKSTATION_ZONES.items():
+        x1, y1, x2, y2 = zone_data[:4]
+        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        
+        # Zona border
+        color = (100, 100, 100)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        
+        # Label zona
+        cv2.putText(frame, zone_name, (x1 + 5, y1 + 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Status okupansi & info
+        if zone_id in zone_ownership:
+            person_id = zone_ownership[zone_id]
+            data = worker_data.get(person_id)
+            if data:
+                # Tampilkan semua status dan durasi
+                info_texts = [
+                    ("WORKING", data["working_time"], (0, 255, 0)),
+                    ("IDLE", data["idle_time"], (0, 165, 255)),
+                    ("AWAY", data["away_time"], (0, 0, 255)),
+                ]
+                for i, (label, duration, color_info) in enumerate(info_texts):
+                    text = f"{label}: {format_time(duration)}"
+                    cv2.putText(frame, text, (x1 + 5, y1 + 45 + i*20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_info, 2)
+        else:
+            # Zona kosong, tampilkan durasi kosong
+            empty_key = f"zone_{zone_id}_empty_since"
+            if not hasattr(draw_zones, "empty_times"):
+                draw_zones.empty_times = {}
+            if empty_key not in draw_zones.empty_times:
+                draw_zones.empty_times[empty_key] = current_time
+            empty_duration = current_time - draw_zones.empty_times[empty_key]
+            cv2.putText(frame, f"Empty: {format_time(empty_duration)}", (x1 + 5, y1 + 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 2)
+        # Reset waktu kosong jika zona baru terisi
+        if zone_id in zone_ownership:
+            empty_key = f"zone_{zone_id}_empty_since"
+            if hasattr(draw_zones, "empty_times") and empty_key in draw_zones.empty_times:
+                draw_zones.empty_times[empty_key] = current_time
+
+# ============================================
+# MAIN LOOP
+# ============================================
+
+
+
+cap = cv2.VideoCapture(video_path)
 frame_count = 0
 fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
-print("🎥 Starting video analysis with ReID...")
-print("📍 Tracking workers across camera movements...")
+output_path = "output_tracking.mp4"
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+
+
+print("🎥 Starting worker tracking...")
+print(f"📍 Monitoring {len(WORKSTATION_ZONES)} workstations")
+print("="*60)
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -230,10 +256,13 @@ while cap.isOpened():
     frame_count += 1
     current_time = time.time()
     
-    # Track dengan YOLO
-    results = model.track(frame, conf=0.5, persist=True, verbose=False)
+    # Gambar zona terlebih dahulu
+    draw_zones(frame)
     
-    active_tracks = set()  # Track ID yang terdeteksi di frame ini
+    # Track dengan YOLO
+    results = model.track(frame, conf=0.7, persist=True, verbose=False)
+    
+    active_persons = set()
     
     for result in results:
         if not hasattr(result, "keypoints") or result.boxes.id is None:
@@ -242,8 +271,6 @@ while cap.isOpened():
         track_ids = result.boxes.id.int().cpu().tolist()
         
         for idx, track_id in enumerate(track_ids):
-            active_tracks.add(track_id)
-            
             keypoints = result.keypoints.xy[idx].cpu().numpy()
             visibility = result.keypoints.conf[idx].cpu().numpy()
             
@@ -255,9 +282,15 @@ while cap.isOpened():
             # Re-identify person
             person_id = reid_person(track_id, center, current_time)
             
+            if person_id is None:
+                # Orang di luar zona, skip
+                continue
+            
+            active_persons.add(person_id)
+            
             # Inisialisasi data jika perlu
             if person_id not in worker_data:
-                zone_id = find_or_create_zone(center, current_time)
+                zone_id = person_to_zone.get(person_id)
                 
                 worker_data[person_id] = {
                     "last_pose": keypoints,
@@ -272,34 +305,17 @@ while cap.isOpened():
                     "last_activity_score": 0,
                     "center": center,
                     "zone_id": zone_id,
-                    "calibration_frames": 0,
-                    "track_ids": {track_id}  # Set of track IDs yang pernah dikaitkan
+                    "track_ids": {track_id}
                 }
             else:
-                # Update track IDs yang dikaitkan
                 worker_data[person_id]["track_ids"].add(track_id)
             
             data = worker_data[person_id]
             data["last_seen"] = current_time
             
-            # Update zona jika masih kalibrasi
-            zone_id = person_to_zone.get(person_id)
-            if zone_id and data["calibration_frames"] < ZONE_CALIBRATION_FRAMES and center:
-                x, y = center
-                old_zone = workstation_zones[zone_id]
-                x1, y1, x2, y2 = old_zone
-                new_zone = (
-                    min(x1, x - ZONE_MARGIN),
-                    min(y1, y - ZONE_MARGIN),
-                    max(x2, x + ZONE_MARGIN),
-                    max(y2, y + ZONE_MARGIN)
-                )
-                workstation_zones[zone_id] = new_zone
-                data["calibration_frames"] += 1
-            
             # Cek zona
-            current_zone = workstation_zones.get(zone_id) if zone_id else None
-            in_zone = is_in_zone(center, current_zone)
+            zone_id = person_to_zone.get(person_id)
+            in_zone = is_in_zone(center, zone_id)
             
             # Hitung activity score
             activity_score = calculate_activity_score(
@@ -310,7 +326,8 @@ while cap.isOpened():
             )
             
             time_delta = current_time - data["last_update"]
-            
+            # time_delta = 1.0 / fps
+
             # Update status
             if not in_zone:
                 if data["status"] != "away":
@@ -356,20 +373,17 @@ while cap.isOpened():
             
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             
-            # Draw zona
-            if zone_id in workstation_zones:
-                zx1, zy1, zx2, zy2 = workstation_zones[zone_id]
-                zone_color = (0, 0, 200) if in_zone else (0, 0, 200)
-                cv2.rectangle(frame, (int(zx1), int(zy1)), (int(zx2), int(zy2)), zone_color, 1)
-                
-                # Label zona
-                cv2.putText(frame, f"Zone {zone_id}", (int(zx1), int(zy1) - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+            # Highlight zona aktif
+            if zone_id in WORKSTATION_ZONES:
+                zx1, zy1, zx2, zy2 = WORKSTATION_ZONES[zone_id][:4]
+                zone_color = (0, 255, 0) if in_zone else (0, 0, 255)
+                cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), zone_color, 3)
             
             if center:
                 cv2.circle(frame, center, 5, (255, 255, 0), -1)
             
-            for kp_idx in HAND_KEYPOINTS + SHOULDER_KEYPOINTS:
+            # Keypoints
+            for kp_idx in HAND_KEYPOINTS + SHOULDER_KEYPOINTS + EAR_KEYPOINTS:
                 if visibility[kp_idx] > VISIBILITY_THRESHOLD:
                     x, y = int(keypoints[kp_idx][0]), int(keypoints[kp_idx][1])
                     cv2.circle(frame, (x, y), 3, (255, 0, 0), -1)
@@ -387,7 +401,7 @@ while cap.isOpened():
                 cv2.putText(frame, away_text, (x1, y1 - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
     
-    # Summary
+    # Summary overlay
     total_workers = len(worker_data)
     working = sum(1 for w in worker_data.values() if w["status"] == "working")
     idle = sum(1 for w in worker_data.values() if w["status"] == "idle")
@@ -397,24 +411,30 @@ while cap.isOpened():
     cv2.rectangle(overlay, (5, 5), (450, 100), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
     
-    cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(workstation_zones)}", (10, 25),
+    cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(WORKSTATION_ZONES)}", (10, 25),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     cv2.putText(frame, f"Working: {working}  |  Idle: {idle}  |  Away: {away}", (10, 50),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(frame, f"Frame: {frame_count} | ReID Active", (10, 75),
+    cv2.putText(frame, f"Frame: {frame_count}", (10, 75),
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
     
-    cv2.imshow("Worker Tracking with ReID", frame)
+    cv2.imshow("Worker Tracking - Hardcoded Zones", frame)
     
+    out.write(frame)  # Tambahkan ini untuk menyimpan frame ke video
+
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
+out.release()
 cv2.destroyAllWindows()
 
-# Summary
+# ============================================
+# FINAL SUMMARY
+# ============================================
+
 print("\n" + "="*60)
-print("📊 WORK ACTIVITY SUMMARY (with ReID)")
+print("📊 WORK ACTIVITY SUMMARY")
 print("="*60)
 
 for person_id, data in sorted(worker_data.items()):
@@ -427,14 +447,19 @@ for person_id, data in sorted(worker_data.items()):
     else:
         work_pct = idle_pct = away_pct = 0
     
+    zone_id = person_to_zone.get(person_id)
+    zone_name = "N/A"
+    if zone_id and zone_id in WORKSTATION_ZONES:
+        zone_name = WORKSTATION_ZONES[zone_id][4] if len(WORKSTATION_ZONES[zone_id]) > 4 else f"Zone {zone_id}"
+    
     track_ids = data.get('track_ids', set())
     print(f"\n👷 Person ID {person_id} (Track IDs: {sorted(track_ids)})")
-    print(f"  ├─ Zone: {person_to_zone.get(person_id, 'N/A')}")
+    print(f"  ├─ Location: {zone_name}")
     print(f"  ├─ Working Time:  {format_time(data['working_time'])}  ({work_pct:.1f}%)")
     print(f"  ├─ Idle Time:     {format_time(data['idle_time'])}  ({idle_pct:.1f}%)")
     print(f"  ├─ Away Time:     {format_time(data['away_time'])}  ({away_pct:.1f}%)")
     print(f"  └─ Efficiency:    {work_pct:.1f}%")
 
 print("\n" + "="*60)
-print(f"✅ Total Workstations Detected: {len(workstation_zones)}")
+print(f"✅ Monitored Workstations: {len(WORKSTATION_ZONES)}")
 print("="*60)
