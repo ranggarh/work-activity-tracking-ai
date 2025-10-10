@@ -6,15 +6,22 @@ import csv
 
 model = YOLO("yolov8n-pose.pt")
 
-# Path video
-video_path = "sample-puterako.mp4"
+# ============================================
+# KONFIGURASI VIDEO SOURCE
+# ============================================
 
-# DEFINISI ZONA WORKSTATION (x1, y1, x2, y2)
-# Format: {zone_id: (x1, y1, x2, y2, "nama_zona")}
+video_path = "http://root:vivo1234@192.168.2.247/video1s1.mjpg"
+# video_path2 = "sample-1.mp4"
+# Aktifkan salah satu:
+VIDEO_SOURCE = video_path  # Menggunakan video file
+
+# ============================================
+# DEFINISI ZONA WORKSTATION
+# ============================================
 WORKSTATION_ZONES = {
     # Video Puterako Zone sample-puterako.mp4
-    1: (10, 50, 350, 550, "Workstation A"),
-    2: (450, 50, 750, 550, "Workstation B"),
+    # 1: (10, 50, 350, 550, "Workstation A"),
+    2: (250, 50, 550, 550, "Workstation B"),
     
     # Sample-1
     # 1: (150, 100, 650, 450, "Workstation A"),
@@ -22,12 +29,10 @@ WORKSTATION_ZONES = {
     # Tambahkan zona sesuai kebutuhan
 }
 
-
-
 worker_data = {}
-zone_ownership = {}  # {zone_id: person_id}
-person_to_zone = {}  # {person_id: zone_id}
-track_to_person = {}  # {track_id: person_id}
+zone_ownership = {}
+person_to_zone = {}
+track_to_person = {}
 
 # Keypoints
 HAND_KEYPOINTS = [9, 10]
@@ -45,6 +50,7 @@ REID_TIMEOUT = 15
 
 next_person_id = 1
 
+# Initialize CSV
 csv_rows = []
 for zone_id, zone_data in WORKSTATION_ZONES.items():
     zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
@@ -65,6 +71,7 @@ with open("workstation_summary.csv", "w", newline="") as f:
     writer.writerows(csv_rows)
 
 print("📁 Summary saved to workstation_summary.csv")
+
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
@@ -228,30 +235,75 @@ def draw_zones(frame):
                 draw_zones.empty_times[empty_key] = current_time
 
 # ============================================
-# MAIN LOOP
+# MAIN LOOP - RTSP SUPPORT
 # ============================================
 
+# Inisialisasi video capture
+print("🔌 Connecting to video source...")
+cap = cv2.VideoCapture(VIDEO_SOURCE)
 
+# Untuk RTSP stream, set buffer size minimal untuk mengurangi latency
+if VIDEO_SOURCE.startswith("rtsp://") or VIDEO_SOURCE.startswith("http://"):
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer untuk RTSP
+    print("📡 RTSP stream detected - buffer optimization enabled")
 
-cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    print("❌ Error: Cannot connect to video source")
+    print(f"   Source: {VIDEO_SOURCE}")
+    exit()
+
+print(f"✅ Connected to: {VIDEO_SOURCE}")
+
 frame_count = 0
 fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
+# Setup video writer
 output_path = "output_tracking.mp4"
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
-
 print("🎥 Starting worker tracking...")
 print(f"📍 Monitoring {len(WORKSTATION_ZONES)} workstations")
 print("="*60)
 
-while cap.isOpened():
+# Untuk RTSP: tracking koneksi error
+reconnect_attempts = 0
+max_reconnect = 5
+
+while True:
     ret, frame = cap.read()
+    
+    # RTSP reconnection logic
     if not ret:
-        break
+        if VIDEO_SOURCE.startswith("rtsp://") or VIDEO_SOURCE.startswith("http://"):
+            reconnect_attempts += 1
+            print(f"⚠️  Connection lost. Reconnecting... (Attempt {reconnect_attempts}/{max_reconnect})")
+            
+            if reconnect_attempts >= max_reconnect:
+                print("❌ Max reconnection attempts reached. Exiting...")
+                break
+            
+            # Release dan reconnect
+            cap.release()
+            time.sleep(2)  # Wait sebelum reconnect
+            cap = cv2.VideoCapture(VIDEO_SOURCE)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            if cap.isOpened():
+                print("✅ Reconnected successfully!")
+                reconnect_attempts = 0
+                continue
+            else:
+                continue
+        else:
+            # Video file selesai
+            print("📹 Video ended.")
+            break
+    
+    # Reset reconnect counter jika frame berhasil dibaca
+    reconnect_attempts = 0
     
     frame_count += 1
     current_time = time.time()
@@ -326,7 +378,6 @@ while cap.isOpened():
             )
             
             time_delta = current_time - data["last_update"]
-            # time_delta = 1.0 / fps
 
             # Update status
             if not in_zone:
@@ -401,6 +452,16 @@ while cap.isOpened():
                 cv2.putText(frame, away_text, (x1, y1 - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
     
+    current_time = time.time()
+    for person_id, data in worker_data.items():
+        if person_id not in active_persons:
+            if current_time - data["last_seen"] > AWAY_TIMEOUT:
+                if data["status"] != "away":
+                    data["status"] = "away"
+                    print(f"⚠️  Worker {person_id} lost from camera, set to away")
+                data["away_time"] += current_time - data["last_update"]
+            data["last_update"] = current_time
+    # === Sampai sini ===
     # Summary overlay
     total_workers = len(worker_data)
     working = sum(1 for w in worker_data.values() if w["status"] == "working")
@@ -418,11 +479,13 @@ while cap.isOpened():
     cv2.putText(frame, f"Frame: {frame_count}", (10, 75),
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
     
-    cv2.imshow("Worker Tracking - Hardcoded Zones", frame)
+    cv2.imshow("Worker Tracking - RTSP Support", frame)
     
-    out.write(frame)  # Tambahkan ini untuk menyimpan frame ke video
+    out.write(frame)
 
+    # Press 'q' to quit
     if cv2.waitKey(1) & 0xFF == ord('q'):
+        print("🛑 Stopped by user")
         break
 
 cap.release()
