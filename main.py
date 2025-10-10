@@ -3,6 +3,48 @@ import cv2
 import numpy as np
 import time
 import csv
+import tkinter as tk
+from tkinter import simpledialog
+
+def get_break_times_ui():
+    """Ambil jam istirahat dari user lewat UI"""
+    root = tk.Tk()
+    root.withdraw()
+    break_times = []
+    while True:
+        start = simpledialog.askstring("Break Time", "Masukkan jam mulai istirahat (HH:MM), kosongkan untuk selesai:")
+        if not start:
+            break
+        end = simpledialog.askstring("Break Time", "Masukkan jam selesai istirahat (HH:MM):")
+        if not end:
+            break
+        try:
+            sh, sm = map(int, start.split(":"))
+            eh, em = map(int, end.split(":"))
+            break_times.append((sh, sm, eh, em))
+        except Exception:
+            tk.messagebox.showerror("Error", "Format salah! Gunakan HH:MM")
+    root.destroy()
+    return break_times
+
+# ============================================
+# AMBIL BREAK TIME DARI USER
+BREAK_TIMES = get_break_times_ui()
+print("⏰ Break times:", BREAK_TIMES)
+
+from datetime import datetime
+
+def is_break_time(now=None):
+    """Cek apakah waktu sekarang adalah break time"""
+    if now is None:
+        now = datetime.now()
+    for start_h, start_m, end_h, end_m in BREAK_TIMES:
+        start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if start <= now <= end:
+            return True
+    return False
+
 
 model = YOLO("yolov8n-pose.pt")
 
@@ -11,7 +53,7 @@ model = YOLO("yolov8n-pose.pt")
 # ============================================
 
 video_path = "http://root:vivo1234@192.168.2.247/video1s1.mjpg"
-# video_path2 = "sample-1.mp4"
+# video_path = "sample-1.mp4"
 # Aktifkan salah satu:
 VIDEO_SOURCE = video_path  # Menggunakan video file
 
@@ -307,6 +349,9 @@ while True:
     
     frame_count += 1
     current_time = time.time()
+    now_dt = datetime.now()
+    break_active = is_break_time(now_dt)
+
     
     # Gambar zona terlebih dahulu
     draw_zones(frame)
@@ -380,32 +425,34 @@ while True:
             time_delta = current_time - data["last_update"]
 
             # Update status
-            if not in_zone:
-                if data["status"] != "away":
-                    if current_time - data["last_update"] > AWAY_TIMEOUT:
-                        data["status"] = "away"
-                        print(f"⚠️  Worker {person_id} left workstation")
-                data["away_time"] += time_delta
-            else:
-                if activity_score > ACTIVITY_THRESHOLD:
-                    if data["status"] != "working":
-                        data["status"] = "working"
-                        if data.get("was_away"):
-                            print(f"✅ Worker {person_id} returned and working")
-                            data["was_away"] = False
-                    data["working_time"] += time_delta
-                    data["last_activity_time"] = current_time
+            if not break_active:
+                if not in_zone:
+                    if data["status"] != "away":
+                        if current_time - data["last_update"] > AWAY_TIMEOUT:
+                            data["status"] = "away"
+                            print(f"⚠️  Worker {person_id} left workstation")
+                    data["away_time"] += time_delta
                 else:
-                    if current_time - data["last_activity_time"] > IDLE_TIMEOUT:
-                        if data["status"] == "working":
-                            data["status"] = "idle"
-                            print(f"💤 Worker {person_id} is idle")
-                        data["idle_time"] += time_delta
-                    else:
+                    if activity_score > ACTIVITY_THRESHOLD:
+                        if data["status"] != "working":
+                            data["status"] = "working"
+                            if data.get("was_away"):
+                                print(f"✅ Worker {person_id} returned and working")
+                                data["was_away"] = False
                         data["working_time"] += time_delta
-            
-            if data["status"] == "away":
-                data["was_away"] = True
+                        data["last_activity_time"] = current_time
+                    else:
+                        if current_time - data["last_activity_time"] > IDLE_TIMEOUT:
+                            if data["status"] == "working":
+                                data["status"] = "idle"
+                                print(f"💤 Worker {person_id} is idle")
+                            data["idle_time"] += time_delta
+                        else:
+                            data["working_time"] += time_delta
+            # Jika break, status tetap, tapi waktu tidak bertambah
+            else:
+                pass  # Tidak menambah working_time, idle_time, away_time
+
             
             data["last_pose"] = keypoints
             data["last_visibility"] = visibility
