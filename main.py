@@ -5,45 +5,46 @@ import time
 import csv
 import tkinter as tk
 from tkinter import simpledialog
+from datetime import datetime
 
 def get_break_times_ui():
-    """Ambil jam istirahat dari user lewat UI"""
+    """Ambil jam istirahat dari user lewat UI (format: HH:MM-HH:MM)"""
+    import tkinter as tk
+    from tkinter import simpledialog, messagebox
+
     root = tk.Tk()
     root.withdraw()
     break_times = []
     while True:
-        start = simpledialog.askstring("Break Time", "Masukkan jam mulai istirahat (HH:MM), kosongkan untuk selesai:")
-        if not start:
-            break
-        end = simpledialog.askstring("Break Time", "Masukkan jam selesai istirahat (HH:MM):")
-        if not end:
+        interval = simpledialog.askstring(
+            "Break Time",
+            "Masukkan interval istirahat (HH:MM-HH:MM), kosongkan untuk selesai:"
+        )
+        if not interval:
             break
         try:
-            sh, sm = map(int, start.split(":"))
-            eh, em = map(int, end.split(":"))
+            start, end = interval.split("-")
+            sh, sm = map(int, start.strip().split(":"))
+            eh, em = map(int, end.strip().split(":"))
             break_times.append((sh, sm, eh, em))
         except Exception:
-            tk.messagebox.showerror("Error", "Format salah! Gunakan HH:MM")
+            messagebox.showerror("Error", "Format salah! Contoh: 12:00-13:00")
     root.destroy()
     return break_times
 
-# ============================================
-# AMBIL BREAK TIME DARI USER
 BREAK_TIMES = get_break_times_ui()
-print("⏰ Break times:", BREAK_TIMES)
-
-from datetime import datetime
 
 def is_break_time(now=None):
     """Cek apakah waktu sekarang adalah break time"""
     if now is None:
         now = datetime.now()
-    for start_h, start_m, end_h, end_m in BREAK_TIMES:
-        start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-        end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    for sh, sm, eh, em in BREAK_TIMES:
+        start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
         if start <= now <= end:
             return True
     return False
+
 
 
 model = YOLO("yolov8n-pose.pt")
@@ -299,6 +300,9 @@ print(f"✅ Connected to: {VIDEO_SOURCE}")
 frame_count = 0
 fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
+fps_display = 0
+fps_timer = time.time()
+
 # Setup video writer
 output_path = "output_tracking.mp4"
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -316,6 +320,8 @@ max_reconnect = 5
 
 while True:
     ret, frame = cap.read()
+    
+    frame = cv2.resize(frame, (640, 360))
     
     # RTSP reconnection logic
     if not ret:
@@ -351,7 +357,12 @@ while True:
     current_time = time.time()
     now_dt = datetime.now()
     break_active = is_break_time(now_dt)
-
+    
+    if frame_count % 10 == 0:
+        elapsed = current_time - fps_timer
+        if elapsed > 0:
+            fps_display = 10 / elapsed
+        fps_timer = current_time
     
     # Gambar zona terlebih dahulu
     draw_zones(frame)
@@ -506,7 +517,8 @@ while True:
                 if data["status"] != "away":
                     data["status"] = "away"
                     print(f"⚠️  Worker {person_id} lost from camera, set to away")
-                data["away_time"] += current_time - data["last_update"]
+                if not break_active:
+                    data["away_time"] += current_time - data["last_update"]
             data["last_update"] = current_time
     # === Sampai sini ===
     # Summary overlay
@@ -523,17 +535,16 @@ while True:
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     cv2.putText(frame, f"Working: {working}  |  Idle: {idle}  |  Away: {away}", (10, 50),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(frame, f"Frame: {frame_count}", (10, 75),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
-    
-    cv2.imshow("Worker Tracking - RTSP Support", frame)
+    cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", (10, 75),
+           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    # cv2.imshow("Worker Tracking - RTSP Support", frame)
     
     out.write(frame)
 
     # Press 'q' to quit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("🛑 Stopped by user")
-        break
+    # if cv2.waitKey(1) & 0xFF == ord('q'):
+    #     print("🛑 Stopped by user")
+    #     break
 
 cap.release()
 out.release()
