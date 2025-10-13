@@ -307,9 +307,21 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
     print(f"\nCamera {cam_idx} Summary:")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")
-    print(f"Total Working: {working}")
-    print(f"Total Idle   : {idle}")
-    print(f"Total Away   : {away}")
+    for zone_id, zone_data in WORKSTATION_ZONES.items():
+        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        # Cari person di zona ini
+        person_id = zone_ownership.get(zone_id)
+        if person_id and person_id in worker_data:
+            w = worker_data[person_id]
+            print(f"Zone {zone_name}:")
+            print(f"  Working Time: {format_time(w['working_time'])}")
+            print(f"  Idle Time   : {format_time(w['idle_time'])}")
+            print(f"  Away Time   : {format_time(w['away_time'])}")
+        else:
+            print(f"Zone {zone_name}:")
+            print(f"  Working Time: 0s")
+            print(f"  Idle Time   : 0s")
+            print(f"  Away Time   : 0s")
     print("="*60)
 
 # =========================
@@ -323,7 +335,7 @@ if __name__ == "__main__":
         2: (250, 50, 550, 550, "Workstation B"),
     }
     ZONES_CAM2 = {
-        1: (150, 100, 650, 450, "Workstation C"),
+        1: (150, 100, 450, 450, "Workstation C"),
         # 2: (700, 100, 1200, 450, "Workstation D"),
     }
     
@@ -333,7 +345,7 @@ if __name__ == "__main__":
     }
     # Break time contoh (bisa diganti sesuai kebutuhan)
     BREAK_TIMES = [
-        (10, 0, 12, 0),  # 10:00-12:00
+        (11, 0, 12, 0),  # 11:00-12:00
     ]
     VIDEO_SOURCES = [
         ("http://root:vivo1234@192.168.2.247/video1s1.mjpg", ZONES_CAM1),
