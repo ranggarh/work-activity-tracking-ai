@@ -1,0 +1,52 @@
+{
+  "work_start": "08:00",
+  "work_end": "17:00",
+  "breaks": [
+    [
+      12,
+      0,
+      13,
+      0
+    ]
+  ],
+  "overtime": [
+    17,
+    0,
+    18,
+    0
+  ],
+  "video_sources": [
+    [
+      "sample-puterako.mp4",
+      {
+        "1": [
+          10,
+          50,
+          250,
+          550,
+          "Workstation E"
+        ],
+        "2": [
+          350,
+          50,
+          550,
+          550,
+          "Workstation F"
+        ]
+      }
+    ],
+    [
+      "http://root:vivo1234@192.168.2.247/video1s1.mjpg",
+      {
+        "1": [
+          250,
+          50,
+          550,
+          550,
+          "Workstation B"
+        ]
+      }
+    ]
+  ],
+  "date": "2025-10-13"
+}

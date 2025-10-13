@@ -5,6 +5,9 @@ import time
 import csv
 from datetime import datetime
 import multiprocessing
+import json
+with open("config.json") as f:
+    config = json.load(f)
 
 # =========================
 # Helper Functions
@@ -329,29 +332,33 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
 # =========================
 
 if __name__ == "__main__":
-    # Zona berbeda untuk tiap kamera
-    ZONES_CAM1 = {
-        # 1: (10, 50, 350, 550, "Workstation A"),
-        2: (250, 50, 550, 550, "Workstation B"),
-    }
-    ZONES_CAM2 = {
-        1: (150, 100, 450, 450, "Workstation C"),
-        # 2: (700, 100, 1200, 450, "Workstation D"),
-    }
+    # Zona berbeda untuk tiap kamera jika tidak menggunakan config scheduler
+    # ZONES_CAM1 = {
+    #     # 1: (10, 50, 350, 550, "Workstation A"),
+    #     2: (250, 50, 550, 550, "Workstation B"),
+    # }
+    # ZONES_CAM2 = {
+    #     1: (150, 100, 450, 450, "Workstation C"),
+    #     # 2: (700, 100, 1200, 450, "Workstation D"),
+    # }
     
-    ZONES_CAM3 = {
-        1: (10, 50, 250, 550, "Workstation E"),
-        2: (350, 50, 550, 550, "Workstation F"),
-    }
+    # ZONES_CAM3 = {
+    #     1: (10, 50, 250, 550, "Workstation E"),
+    #     2: (350, 50, 550, 550, "Workstation F"),
+    # }
     # Break time contoh (bisa diganti sesuai kebutuhan)
-    BREAK_TIMES = [
-        (11, 0, 12, 0),  # 11:00-12:00
-    ]
-    VIDEO_SOURCES = [
-        ("http://root:vivo1234@192.168.2.247/video1s1.mjpg", ZONES_CAM1),
-        ("sample-1.mp4", ZONES_CAM2),
-        ("sample-puterako.mp4", ZONES_CAM3),
-    ]
+    # BREAK_TIMES = [
+    #     (11, 0, 12, 0),  # 11:00-12:00
+    # ]
+    # VIDEO_SOURCES = [
+    #     ("http://root:vivo1234@192.168.2.247/video1s1.mjpg", ZONES_CAM1),
+    #     ("sample-1.mp4", ZONES_CAM2),
+    #     ("sample-puterako.mp4", ZONES_CAM3),
+    # ]
+    
+    # Jika menggunakan config scheduler
+    BREAK_TIMES = config["breaks"]
+    VIDEO_SOURCES = config["video_sources"]
     
     jobs = []
     for idx, (src, zones) in enumerate(VIDEO_SOURCES, start=1):
