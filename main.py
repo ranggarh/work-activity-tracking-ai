@@ -24,6 +24,28 @@ def format_time(seconds):
         return f"{minutes}m {secs}s"
     return f"{secs}s"
 
+def is_work_time(now, work_start, work_end, overtime):
+    # work_start & work_end: "HH:MM" string
+    # overtime: list of [sh, sm, eh, em]
+    hour = now.hour
+    minute = now.minute
+    in_work = False
+    if work_start and work_end:
+        sh, sm = map(int, work_start.split(":"))
+        eh, em = map(int, work_end.split(":"))
+        start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+        if start <= now <= end:
+            in_work = True
+    # Cek lembur
+    for ot in overtime:
+        osh, osm, oeh, oem = ot
+        ot_start = now.replace(hour=osh, minute=osm, second=0, microsecond=0)
+        ot_end = now.replace(hour=oeh, minute=oem, second=0, microsecond=0)
+        if ot_start <= now <= ot_end:
+            in_work = True
+    return in_work
+
 def is_break_time(now, break_times):
     for sh, sm, eh, em in break_times:
         start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
@@ -118,7 +140,7 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
 # Tracking Function
 # =========================
 
-def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
+def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime):
     # Keypoints & Thresholds
     HAND_KEYPOINTS = [9, 10]
     SHOULDER_KEYPOINTS = [5, 6]
@@ -166,6 +188,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
         current_time = time.time()
         now_dt = datetime.now()
         break_active = is_break_time(now_dt, break_times)
+        work_active = is_work_time(now_dt, work_start, work_end, overtime)
 
         if frame_count % 10 == 0:
             elapsed = current_time - fps_timer
@@ -253,7 +276,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
                     VISIBILITY_THRESHOLD
                 )
                 time_delta = current_time - data["last_update"]
-                if not break_active:
+                if work_active and not break_active:
                     if not in_zone:
                         if data["status"] != "away":
                             if current_time - data["last_update"] > AWAY_TIMEOUT:
@@ -296,7 +319,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times):
         overlay = frame.copy()
         cv2.rectangle(overlay, (5, 5), (450, 100), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        cv2.putText(frame, f"Camera {cam_idx}", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        now_dt = datetime.now()
+        timestamp_str = now_dt.strftime("%H:%M:%S")
+        cv2.putText(frame, f"Camera {cam_idx} [{timestamp_str}]", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
         cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(WORKSTATION_ZONES)}", (10, 35),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(frame, f"Working: {working}  |  Idle: {idle}  |  Away: {away}", (10, 60),
@@ -357,12 +382,17 @@ if __name__ == "__main__":
     # ]
     
     # Jika menggunakan config scheduler
-    BREAK_TIMES = config["breaks"]
+    # BREAK_TIMES = config["breaks"]
     VIDEO_SOURCES = config["video_sources"]
     
     jobs = []
-    for idx, (src, zones) in enumerate(VIDEO_SOURCES, start=1):
-        p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, BREAK_TIMES))
+    for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
+        zones = cam_config.get("zones", {})
+        breaks = cam_config.get("breaks", [])
+        work_start = cam_config.get("work_start", "")
+        work_end = cam_config.get("work_end", "")
+        overtime = cam_config.get("overtime", [])
+        p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime))
         p.start()
         jobs.append(p)
     for p in jobs:
