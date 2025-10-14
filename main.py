@@ -321,9 +321,13 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
         cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", (10, 85),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         out.write(frame)
+        cv2.imshow(f"Camera {cam_idx}", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
     cap.release()
     out.release()
+    cv2.destroyAllWindows()
     print(f"\nCamera {cam_idx} Summary:")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")

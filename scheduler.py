@@ -8,7 +8,7 @@ class SchedulerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Work Activity Tracking Scheduler by Puterako")
-        self.geometry("800x700")
+        self.geometry("900x700")
         
         # Load config
         self.config_data = None
@@ -528,7 +528,9 @@ class SchedulerGUI(tk.Tk):
                 
                 # Parse breaks
                 breaks = []
-                for start, end in entry['breaks']:
+                for break_entry in entry['breaks']:
+                    start = break_entry[0]
+                    end = break_entry[1]
                     s = start.get().strip()
                     e = end.get().strip()
                     if s and e:
@@ -537,7 +539,9 @@ class SchedulerGUI(tk.Tk):
                         breaks.append([sh, sm, eh, em])
 
                 overtime = []
-                for start, end in entry['overtime']:
+                for ot_entry in entry['overtime']:
+                    start = ot_entry[0]
+                    end = ot_entry[1]
                     s = start.get().strip()
                     e = end.get().strip()
                     if s and e:
