@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import multiprocessing
 import json
+import signal
 
 with open("config.json") as f:
     config = json.load(f)
@@ -135,7 +136,7 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
 # Tracking Function
 # =========================
 
-def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime, frame_queue):
+def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime, frame_queue, stop_event=None):
     """
     Modified tracking function that sends frames to queue instead of showing windows
     """
@@ -173,6 +174,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     out = cv2.VideoWriter(f"output_tracking_cam{cam_idx}.mp4", fourcc, fps, (640, 360))
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            print(f"[INFO] Camera {cam_idx} received stop event, exiting...")
+            break
         ret, frame = cap.read()
         if not ret:
             break
@@ -322,11 +326,13 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
         # Send frame to queue (non-blocking)
         try:
             if not frame_queue.full():
-                # Convert frame to RGB for PIL/Tkinter
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_queue.put((cam_idx, frame_rgb), block=False)
-        except:
-            pass  # Queue full, skip this frame
+                if frame is not None and frame.shape == (360, 640, 3):
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame_queue.put((cam_idx, frame_rgb), block=False)
+                else:
+                    print(f"[WARNING] Frame shape invalid: {frame.shape if frame is not None else None}")
+        except Exception as e:
+            print(f"[ERROR] Queue put error: {e}")
 
     cap.release()
     out.release()
@@ -348,6 +354,12 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
             print(f"  Idle Time   : 0s")
             print(f"  Away Time   : 0s")
     print("="*60)
+    
+def terminate_all(jobs):
+    for p in jobs:
+        if p.is_alive():
+            p.terminate()
+            p.join()
 
 # =========================
 # Multiprocessing Main
@@ -355,10 +367,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
 
 if __name__ == "__main__":
     VIDEO_SOURCES = config["video_sources"]
-    
-    # Create shared queue for frames (max 30 frames buffer)
     frame_queue = multiprocessing.Queue(maxsize=30)
-    
     jobs = []
     for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
         zones = cam_config.get("zones", {})
@@ -369,6 +378,16 @@ if __name__ == "__main__":
         p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime, frame_queue))
         p.start()
         jobs.append(p)
-    
-    for p in jobs:
-        p.join()
+
+    def signal_handler(sig, frame):
+        print("Ctrl+C detected, terminating all processes...")
+        terminate_all(jobs)
+        exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        for p in jobs:
+            p.join()
+    except KeyboardInterrupt:
+        terminate_all(jobs)

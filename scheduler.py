@@ -10,7 +10,7 @@ import time
 
 
 class SchedulerGUI(tk.Tk):
-    def __init__(self, frame_queue=None):
+    def __init__(self, frame_queue=None, jobs=None, stop_events=None):
         super().__init__()
         self.title("Work Activity Tracking Scheduler by Puterako")
         self.geometry("1200x800")
@@ -19,6 +19,10 @@ class SchedulerGUI(tk.Tk):
         self.frame_queue = frame_queue
         self.camera_labels = {}  # Store label widgets for each camera
         self.running = True
+        
+        self.jobs = jobs 
+        self.stop_events = stop_events
+
         
         # Load config
         self.config_data = None
@@ -184,6 +188,7 @@ class SchedulerGUI(tk.Tk):
 
         try:
             # Ambil ukuran label video
+            print(f"[DEBUG] frame_rgb type: {type(frame_rgb)}, shape: {getattr(frame_rgb, 'shape', None)}")
             video_label = self.camera_labels[cam_idx]['video']
             label_width = video_label.winfo_width() or 320
             label_height = video_label.winfo_height() or 180
@@ -729,10 +734,21 @@ class SchedulerGUI(tk.Tk):
             messagebox.showerror("Error", f"Gagal menyimpan!\n{e}")
 
     def on_closing(self):
-        """Handle window closing"""
         self.running = False
+        # Graceful stop for tracking processes
+        if self.stop_events:
+            print("[INFO] Sending stop event to all tracking processes...")
+            for ev in self.stop_events:
+                ev.set()
+        # Destroy GUI first, then join in background
         self.destroy()
-
+        if self.jobs:
+            def join_jobs():
+                print("[INFO] Waiting for all tracking processes to finish...")
+                for p in self.jobs:
+                    p.join()
+                print("[INFO] All tracking processes finished.")
+            threading.Thread(target=join_jobs, daemon=True).start()
 
 if __name__ == "__main__":
     app = SchedulerGUI()
