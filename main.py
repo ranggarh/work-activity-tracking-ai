@@ -2,7 +2,6 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
-import csv
 from datetime import datetime
 import multiprocessing
 import json
@@ -27,8 +26,6 @@ def format_time(seconds):
 def is_work_time(now, work_start, work_end, overtime):
     # work_start & work_end: "HH:MM" string
     # overtime: list of [sh, sm, eh, em]
-    hour = now.hour
-    minute = now.minute
     in_work = False
     if work_start and work_end:
         sh, sm = map(int, work_start.split(":"))
@@ -146,7 +143,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     SHOULDER_KEYPOINTS = [5, 6]
     HEAD_KEYPOINT = 0
     HIP_KEYPOINTS = [11, 12]
-    EAR_KEYPOINTS = [3, 4]
     ACTIVITY_THRESHOLD = 8
     IDLE_TIMEOUT = 3
     AWAY_TIMEOUT = 5
@@ -172,12 +168,8 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     fps_display = 0
     fps_timer = time.time()
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(f"output_tracking_cam{cam_idx}.mp4", fourcc, fps, (640, 360))
-    reconnect_attempts = 0
-    max_reconnect = 5
 
     while True:
         ret, frame = cap.read()

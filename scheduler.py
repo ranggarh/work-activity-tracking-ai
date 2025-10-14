@@ -7,8 +7,8 @@ from datetime import datetime
 class SchedulerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Scheduler Config")
-        self.geometry("800x600")
+        self.title("Work Activity Tracking Scheduler by Puterako")
+        self.geometry("800x700")
         
         # Load config
         self.config_data = None
@@ -21,12 +21,20 @@ class SchedulerGUI(tk.Tk):
         except Exception:
             pass
 
-        # Header
-        header = tk.Frame(self, bg="#2196F3", height=60)
+        header = tk.Frame(self, bg="#FFFFFF", height=60)
         header.pack(fill="x")
+
+        # Logo kiri
+        logo_img = tk.PhotoImage(file="logo_puterako.png").subsample(4, 4)  # Pastikan file logo PNG ada di folder yang sama
+        logo_label = tk.Label(header, image=logo_img, bg="#FFFFFF")
+        logo_label.image = logo_img  # Keep reference
+        logo_label.pack(side="left", padx=15, pady=10)
+
+        # Tanggal kanan
         today = datetime.now().strftime("%A, %d %B %Y")
-        tk.Label(header, text=f"📅 {today}", font=("Arial", 14, "bold"), 
-                bg="#2196F3", fg="white").pack(pady=15)
+        date_label = tk.Label(header, text=f"📅 {today}", font=("Arial", 14, "bold"),
+                            bg="#FFFFFF", fg="black")
+        date_label.pack(side="right", padx=15, pady=10)
 
         # Notebook untuk tabs
         self.notebook = ttk.Notebook(self)
@@ -167,8 +175,25 @@ class SchedulerGUI(tk.Tk):
         if value:
             start.insert(0, value[0])
             end.insert(0, value[1])
-        break_entries.append((start, end))
-
+        # Tampilkan tombol hapus hanya jika jumlah entry > 0 (artinya sudah ada lebih dari satu)
+        if row > 0:
+            btn = tk.Button(parent, text="Hapus", command=lambda: self.remove_break_entry(parent, break_entries, row), width=6, padx=2, bg="#f44336", fg="white")
+            btn.grid(row=row, column=4)
+        else:
+            btn = None
+        break_entries.append((start, end, btn))
+        
+    def remove_ot_entry(self, parent, ot_entries, idx):
+        for widget in parent.grid_slaves(row=idx):
+            widget.destroy()
+        ot_entries.pop(idx)
+        for i, (start, end, btn) in enumerate(ot_entries):
+            start.grid(row=i, column=1)
+            end.grid(row=i, column=3)
+            if btn is not None:
+                btn.grid(row=i, column=4)
+                btn.config(command=lambda i=i: self.remove_ot_entry(parent, ot_entries, i))
+                
     def add_ot_entry(self, parent, ot_entries, value=""):
         row = len(ot_entries)
         start = tk.Entry(parent, width=8)
@@ -180,7 +205,12 @@ class SchedulerGUI(tk.Tk):
         if value:
             start.insert(0, value[0])
             end.insert(0, value[1])
-        ot_entries.append((start, end))
+        if row > 0:
+            btn = tk.Button(parent, text="Hapus", command=lambda: self.remove_ot_entry(parent, ot_entries, row), width=6, padx=2, bg="#f44336", fg="white")
+            btn.grid(row=row, column=4)
+        else:
+            btn = None
+        ot_entries.append((start, end, btn))
 
     def add_camera_row(self, src_val="", zones=None, work_start="", work_end="", breaks=None, overtime=None):
         row_num = len(self.camera_entries)
@@ -303,6 +333,17 @@ class SchedulerGUI(tk.Tk):
             'zones': zone_text
         })
 
+    def remove_break_entry(self, parent, break_entries, idx):
+        for widget in parent.grid_slaves(row=idx):
+            widget.destroy()
+        break_entries.pop(idx)
+        for i, (start, end, btn) in enumerate(break_entries):
+            start.grid(row=i, column=1)
+            end.grid(row=i, column=3)
+            if btn is not None:
+                btn.grid(row=i, column=4)
+                btn.config(command=lambda i=i: self.remove_break_entry(parent, break_entries, i))
+            
     def remove_camera(self, frame):
         for i, entry in enumerate(self.camera_entries):
             if entry['frame'] == frame:
@@ -444,7 +485,7 @@ class SchedulerGUI(tk.Tk):
         # Apply breaks (istirahat)
         breaks = template.get('breaks', [])
         # Hapus semua entry lama
-        for start, end in entries['breaks']:
+        for start, end, *_ in entries['breaks']:
             start.delete(0, tk.END)
             end.delete(0, tk.END)
         # Jika jumlah entry kurang, tambahkan
@@ -461,7 +502,7 @@ class SchedulerGUI(tk.Tk):
 
         # Apply overtime (lembur)
         overtime = template.get('overtime', [])
-        for start, end in entries['overtime']:
+        for start, end, *_ in entries['overtime']:
             start.delete(0, tk.END)
             end.delete(0, tk.END)
         while len(entries['overtime']) < len(overtime):
