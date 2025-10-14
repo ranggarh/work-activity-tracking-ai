@@ -2,13 +2,23 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import json
 from datetime import datetime
+from PIL import Image, ImageTk
+import threading
+import multiprocessing
+import queue
+import time
 
 
 class SchedulerGUI(tk.Tk):
-    def __init__(self):
+    def __init__(self, frame_queue=None):
         super().__init__()
         self.title("Work Activity Tracking Scheduler by Puterako")
-        self.geometry("900x700")
+        self.geometry("1200x800")
+        
+        # Shared queue for frames
+        self.frame_queue = frame_queue
+        self.camera_labels = {}  # Store label widgets for each camera
+        self.running = True
         
         # Load config
         self.config_data = None
@@ -16,7 +26,6 @@ class SchedulerGUI(tk.Tk):
         try:
             with open("config.json") as f:
                 self.config_data = json.load(f)
-                # Load templates jika ada
                 self.schedule_templates = self.config_data.get("schedule_templates", {})
         except Exception:
             pass
@@ -25,10 +34,13 @@ class SchedulerGUI(tk.Tk):
         header.pack(fill="x")
 
         # Logo kiri
-        logo_img = tk.PhotoImage(file="logo_puterako.png").subsample(4, 4)  # Pastikan file logo PNG ada di folder yang sama
-        logo_label = tk.Label(header, image=logo_img, bg="#FFFFFF")
-        logo_label.image = logo_img  # Keep reference
-        logo_label.pack(side="left", padx=15, pady=10)
+        try:
+            logo_img = tk.PhotoImage(file="logo_puterako.png").subsample(4, 4)
+            logo_label = tk.Label(header, image=logo_img, bg="#FFFFFF")
+            logo_label.image = logo_img
+            logo_label.pack(side="left", padx=15, pady=10)
+        except:
+            pass
 
         # Tanggal kanan
         today = datetime.now().strftime("%A, %d %B %Y")
@@ -40,10 +52,13 @@ class SchedulerGUI(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Tab 1: Template Jadwal
+        # Tab 1: Live Tracking
+        self.create_live_tracking_tab()
+        
+        # Tab 2: Template Jadwal
         self.create_template_tab()
         
-        # Tab 2: Konfigurasi Kamera
+        # Tab 3: Konfigurasi Kamera
         self.create_camera_tab()
 
         # Bottom buttons
@@ -53,8 +68,143 @@ class SchedulerGUI(tk.Tk):
                  bg="#4CAF50", fg="white", font=("Arial", 11, "bold"), 
                  padx=20, pady=10).pack(side="right")
         
-    
+        # Start frame update thread if queue is provided
+        if self.frame_queue:
+            self.start_frame_update_thread()
+        
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
+    def create_live_tracking_tab(self):
+        """Create tab for live camera feeds"""
+        live_tab = tk.Frame(self.notebook)
+        self.notebook.add(live_tab, text="📹 Live Tracking")
+
+        # Control panel
+        control_frame = tk.Frame(live_tab, bg="#f0f0f0", height=50)
+        control_frame.pack(fill="x", padx=5, pady=5)
+        
+        tk.Label(control_frame, text="Live Camera Feeds", font=("Arial", 14, "bold"),
+                bg="#f0f0f0").pack(side="left", padx=10)
+        
+        self.status_label = tk.Label(control_frame, text="● Streaming", 
+                                     font=("Arial", 10), fg="green", bg="#f0f0f0")
+        self.status_label.pack(side="right", padx=10)
+
+        # Canvas with scrollbar for camera grid
+        canvas_frame = tk.Frame(live_tab)
+        canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        canvas = tk.Canvas(canvas_frame, bg="#2b2b2b")
+        scrollbar = tk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        self.camera_container = tk.Frame(canvas, bg="#2b2b2b")
+        
+        self.camera_container.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.camera_container, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Bind mouse wheel
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        # Initialize camera display widgets
+        self.init_camera_widgets()
+
+    def init_camera_widgets(self):
+        """Initialize display widgets for each camera"""
+        if not self.config_data or "video_sources" not in self.config_data:
+            return
+        
+        num_cameras = len(self.config_data["video_sources"])
+        cols = 2  # Bisa diubah sesuai kebutuhan
+
+        for idx in range(num_cameras):
+            row = idx // cols
+            col = idx % cols
+            
+            cam_frame = tk.LabelFrame(self.camera_container, 
+                                    text=f"Camera {idx + 1}",
+                                    bg="#1e1e1e", fg="white",
+                                    font=("Arial", 10, "bold"),
+                                    padx=5, pady=5)
+            cam_frame.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+            
+            # Ubah ukuran label video jadi kecil
+            video_label = tk.Label(cam_frame, bg="black", width=320, height=180)
+            video_label.pack()
+            
+            info_label = tk.Label(cam_frame, text="Waiting for feed...", 
+                                bg="#1e1e1e", fg="gray", font=("Arial", 9))
+            info_label.pack(pady=5)
+            
+            self.camera_labels[idx + 1] = {
+                'video': video_label,
+                'info': info_label,
+                'last_update': 0
+            }
+        
+        for i in range(cols):
+            self.camera_container.columnconfigure(i, weight=1)
+    def start_frame_update_thread(self):
+        """Start background thread to update frames from queue"""
+        def update_frames():
+            last_frame_time = time.time()
+            while self.running:
+                try:
+                    # Get frame from queue (with timeout)
+                    cam_idx, frame_rgb = self.frame_queue.get(timeout=0.1)
+                    print(f"[DEBUG] Frame received for camera {cam_idx} at {time.strftime('%H:%M:%S')}")
+                    last_frame_time = time.time()
+                    # Update GUI in main thread
+                    self.after(0, self.update_camera_display, cam_idx, frame_rgb)
+                except queue.Empty:
+                    # Jika lebih dari 2 detik tidak ada frame, log
+                    if time.time() - last_frame_time > 2:
+                        print("[DEBUG] Tidak ada frame baru dalam 2 detik")
+                        last_frame_time = time.time()
+                    continue
+                except Exception as e:
+                    print(f"[ERROR] Error updating frame: {e}")
+                    continue
+
+        thread = threading.Thread(target=update_frames, daemon=True)
+        thread.start()
+
+    def update_camera_display(self, cam_idx, frame_rgb):
+        """Update camera display with new frame (runs in main thread)"""
+        if cam_idx not in self.camera_labels:
+            print(f"[WARNING] cam_idx {cam_idx} not in camera_labels")
+            return
+
+        try:
+            # Ambil ukuran label video
+            video_label = self.camera_labels[cam_idx]['video']
+            label_width = video_label.winfo_width() or 320
+            label_height = video_label.winfo_height() or 180
+
+            # Resize frame dengan rasio yang sesuai (fit, tidak crop)
+            img = Image.fromarray(frame_rgb)
+            img = img.resize((label_width, label_height), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image=img)
+            video_label.configure(image=photo)
+            video_label.image = photo  # Keep reference
+
+            current_time = datetime.now().strftime("%H:%M:%S")
+            self.camera_labels[cam_idx]['info'].configure(
+                text=f"Last update: {current_time}",
+                fg="lime"
+            )
+            self.camera_labels[cam_idx]['last_update'] = datetime.now().timestamp()
+            print(f"[DEBUG] Frame displayed for camera {cam_idx} at {current_time}")
+
+        except Exception as e:
+            print(f"[ERROR] Error displaying frame for camera {cam_idx}: {e}")
     def create_template_tab(self):
         template_tab = tk.Frame(self.notebook)
         self.notebook.add(template_tab, text="📋 Template Jadwal")
@@ -121,7 +271,7 @@ class SchedulerGUI(tk.Tk):
 
     def create_camera_tab(self):
         camera_tab = tk.Frame(self.notebook)
-        self.notebook.add(camera_tab, text="📹 Konfigurasi Kamera")
+        self.notebook.add(camera_tab, text="🎥 Konfigurasi Kamera")
 
         # Toolbar
         toolbar = tk.Frame(camera_tab)
@@ -175,7 +325,6 @@ class SchedulerGUI(tk.Tk):
         if value:
             start.insert(0, value[0])
             end.insert(0, value[1])
-        # Tampilkan tombol hapus hanya jika jumlah entry > 0 (artinya sudah ada lebih dari satu)
         if row > 0:
             btn = tk.Button(parent, text="Hapus", command=lambda: self.remove_break_entry(parent, break_entries, row), width=6, padx=2, bg="#f44336", fg="white")
             btn.grid(row=row, column=4)
@@ -378,10 +527,8 @@ class SchedulerGUI(tk.Tk):
             self.tmpl_overtime.delete(0, tk.END)
             if overtime:
                 if len(overtime) == 4 and isinstance(overtime[0], int):
-                    # Old format
                     self.tmpl_overtime.insert(0, f"{overtime[0]:02d}:{overtime[1]:02d}-{overtime[2]:02d}:{overtime[3]:02d}")
                 elif isinstance(overtime, list):
-                    # New format: multiple
                     ot_strs = []
                     for ot in overtime:
                         if len(ot) == 4:
@@ -464,7 +611,7 @@ class SchedulerGUI(tk.Tk):
             # Update all comboboxes
             for entry in self.camera_entries:
                 if entry['template'].get() == template_name:
-                    entry['template'].current(0)  # Set to Custom
+                    entry['template'].current(0)
                 entry['template']['values'] = ["-- Custom --"] + list(self.schedule_templates.keys())
 
     def apply_template(self, event, entries):
@@ -484,14 +631,11 @@ class SchedulerGUI(tk.Tk):
 
         # Apply breaks (istirahat)
         breaks = template.get('breaks', [])
-        # Hapus semua entry lama
         for start, end, *_ in entries['breaks']:
             start.delete(0, tk.END)
             end.delete(0, tk.END)
-        # Jika jumlah entry kurang, tambahkan
         while len(entries['breaks']) < len(breaks):
             self.add_break_entry(start.master, entries['breaks'])
-        # Isi entry sesuai template
         for i, br in enumerate(breaks):
             s = f"{br[0]:02d}:{br[1]:02d}"
             e = f"{br[2]:02d}:{br[3]:02d}"
@@ -514,6 +658,7 @@ class SchedulerGUI(tk.Tk):
             entries['overtime'][i][0].insert(0, s)
             entries['overtime'][i][1].delete(0, tk.END)
             entries['overtime'][i][1].insert(0, e)
+
     def save_config(self):
         try:
             video_sources = []
@@ -528,9 +673,7 @@ class SchedulerGUI(tk.Tk):
                 
                 # Parse breaks
                 breaks = []
-                for break_entry in entry['breaks']:
-                    start = break_entry[0]
-                    end = break_entry[1]
+                for start, end, *_ in entry['breaks']:
                     s = start.get().strip()
                     e = end.get().strip()
                     if s and e:
@@ -539,9 +682,7 @@ class SchedulerGUI(tk.Tk):
                         breaks.append([sh, sm, eh, em])
 
                 overtime = []
-                for ot_entry in entry['overtime']:
-                    start = ot_entry[0]
-                    end = ot_entry[1]
+                for start, end, *_ in entry['overtime']:
                     s = start.get().strip()
                     e = end.get().strip()
                     if s and e:
@@ -586,6 +727,11 @@ class SchedulerGUI(tk.Tk):
             
         except Exception as e:
             messagebox.showerror("Error", f"Gagal menyimpan!\n{e}")
+
+    def on_closing(self):
+        """Handle window closing"""
+        self.running = False
+        self.destroy()
 
 
 if __name__ == "__main__":

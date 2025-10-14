@@ -12,8 +12,8 @@
             "Workstation B"
           ]
         },
-        "work_start": "16:10",
-        "work_end": "17:00",
+        "work_start": "08:00",
+        "work_end": "20:00",
         "breaks": [
           [
             12,
@@ -24,9 +24,9 @@
         ],
         "overtime": [
           [
-            17,
+            20,
             0,
-            18,
+            21,
             0
           ]
         ]
@@ -49,6 +49,38 @@
             550,
             550,
             "Workstation F"
+          ]
+        },
+        "work_start": "08:00",
+        "work_end": "17:00",
+        "breaks": [
+          [
+            14,
+            0,
+            15,
+            0
+          ]
+        ],
+        "overtime": [
+          [
+            17,
+            0,
+            18,
+            0
+          ]
+        ]
+      }
+    ],
+    [
+      "sample-1.mp4",
+      {
+        "zones": {
+          "1": [
+            150,
+            100,
+            450,
+            450,
+            "Workstation C"
           ]
         },
         "work_start": "08:00",
@@ -112,7 +144,27 @@
           0
         ]
       ]
+    },
+    "Lembur Pagi to Malam": {
+      "work_start": "08:00",
+      "work_end": "17:00",
+      "breaks": [
+        [
+          14,
+          0,
+          15,
+          0
+        ]
+      ],
+      "overtime": [
+        [
+          17,
+          0,
+          18,
+          0
+        ]
+      ]
     }
   },
-  "date": "2025-10-13"
+  "date": "2025-10-14"
 }

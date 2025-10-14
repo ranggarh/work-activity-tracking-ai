@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import multiprocessing
 import json
+
 with open("config.json") as f:
     config = json.load(f)
 
@@ -24,8 +25,6 @@ def format_time(seconds):
     return f"{secs}s"
 
 def is_work_time(now, work_start, work_end, overtime):
-    # work_start & work_end: "HH:MM" string
-    # overtime: list of [sh, sm, eh, em]
     in_work = False
     if work_start and work_end:
         sh, sm = map(int, work_start.split(":"))
@@ -34,7 +33,6 @@ def is_work_time(now, work_start, work_end, overtime):
         end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
         if start <= now <= end:
             in_work = True
-    # Cek lembur
     for ot in overtime:
         osh, osm, oeh, oem = ot
         ot_start = now.replace(hour=osh, minute=osm, second=0, microsecond=0)
@@ -137,7 +135,10 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
 # Tracking Function
 # =========================
 
-def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime):
+def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime, frame_queue):
+    """
+    Modified tracking function that sends frames to queue instead of showing windows
+    """
     # Keypoints & Thresholds
     HAND_KEYPOINTS = [9, 10]
     SHOULDER_KEYPOINTS = [5, 6]
@@ -202,7 +203,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 for i, (x, y) in enumerate(keypoints):
                     if visibility[i] > 0.5:
                         cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 0), -1)
-                # Gambar skeleton sederhana (misal: kepala ke bahu, bahu ke tangan, dst)
                 skeleton_pairs = [
                     (0, 5), (0, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 6), (5, 11), (6, 12), (11, 12)
                 ]
@@ -214,20 +214,16 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 if not is_valid_detection(visibility, HEAD_KEYPOINT, VISIBILITY_THRESHOLD):
                     continue
                 center = get_person_center(keypoints, visibility, HEAD_KEYPOINT, SHOULDER_KEYPOINTS, HIP_KEYPOINTS, VISIBILITY_THRESHOLD)
-                # Re-identify person
-                # PRIORITAS 1: Track ID yang sama = person yang sama
+                
                 if track_id in track_to_person:
                     person_id = track_to_person[track_id]
                 else:
-                    # PRIORITAS 2: Cari zona dari posisi
                     zone_id = find_zone_by_position(center, WORKSTATION_ZONES)
                     if zone_id is None:
                         continue
-                    # PRIORITAS 3: Cek ownership zona
                     if zone_id in zone_ownership:
                         person_id = zone_ownership[zone_id]
                     else:
-                        # Person baru di zona ini
                         person_id = next_person_id
                         next_person_id += 1
                         zone_ownership[zone_id] = person_id
@@ -320,20 +316,25 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", (10, 85),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
         out.write(frame)
-        cv2.imshow(f"Camera {cam_idx}", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        
+        # Send frame to queue (non-blocking)
+        try:
+            if not frame_queue.full():
+                # Convert frame to RGB for PIL/Tkinter
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_queue.put((cam_idx, frame_rgb), block=False)
+        except:
+            pass  # Queue full, skip this frame
 
     cap.release()
     out.release()
-    cv2.destroyAllWindows()
     print(f"\nCamera {cam_idx} Summary:")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")
     for zone_id, zone_data in WORKSTATION_ZONES.items():
         zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
-        # Cari person di zona ini
         person_id = zone_ownership.get(zone_id)
         if person_id and person_id in worker_data:
             w = worker_data[person_id]
@@ -353,33 +354,10 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
 # =========================
 
 if __name__ == "__main__":
-    # Zona berbeda untuk tiap kamera jika tidak menggunakan config scheduler
-    # ZONES_CAM1 = {
-    #     # 1: (10, 50, 350, 550, "Workstation A"),
-    #     2: (250, 50, 550, 550, "Workstation B"),
-    # }
-    # ZONES_CAM2 = {
-    #     1: (150, 100, 450, 450, "Workstation C"),
-    #     # 2: (700, 100, 1200, 450, "Workstation D"),
-    # }
-    
-    # ZONES_CAM3 = {
-    #     1: (10, 50, 250, 550, "Workstation E"),
-    #     2: (350, 50, 550, 550, "Workstation F"),
-    # }
-    # Break time contoh (bisa diganti sesuai kebutuhan)
-    # BREAK_TIMES = [
-    #     (11, 0, 12, 0),  # 11:00-12:00
-    # ]
-    # VIDEO_SOURCES = [
-    #     ("http://root:vivo1234@192.168.2.247/video1s1.mjpg", ZONES_CAM1),
-    #     ("sample-1.mp4", ZONES_CAM2),
-    #     ("sample-puterako.mp4", ZONES_CAM3),
-    # ]
-    
-    # Jika menggunakan config scheduler
-    # BREAK_TIMES = config["breaks"]
     VIDEO_SOURCES = config["video_sources"]
+    
+    # Create shared queue for frames (max 30 frames buffer)
+    frame_queue = multiprocessing.Queue(maxsize=30)
     
     jobs = []
     for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
@@ -388,8 +366,9 @@ if __name__ == "__main__":
         work_start = cam_config.get("work_start", "")
         work_end = cam_config.get("work_end", "")
         overtime = cam_config.get("overtime", [])
-        p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime))
+        p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime, frame_queue))
         p.start()
         jobs.append(p)
+    
     for p in jobs:
         p.join()
