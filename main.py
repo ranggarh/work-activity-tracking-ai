@@ -11,7 +11,7 @@ import threading
 import socket
 import pickle
 import struct
-
+import queue
 with open("config.json") as f:
     config = json.load(f)
 
@@ -28,16 +28,26 @@ def frame_server(frame_queue, host='localhost', port=9999):
         print("[FrameServer] Waiting for client connection...")
         conn, addr = server_socket.accept()
         print(f"[FrameServer] Client connected: {addr}")
+
+        # Flush frame_queue to avoid sending old frames
+        try:
+            while not frame_queue.empty():
+                frame_queue.get_nowait()
+        except Exception:
+            pass
+
         try:
             while True:
-                cam_idx, frame_rgb = frame_queue.get()
-                data = pickle.dumps((cam_idx, frame_rgb))
-                msg = struct.pack("Q", len(data)) + data
-                conn.sendall(msg)
+                try:
+                    cam_idx, frame_rgb = frame_queue.get(timeout=1)
+                    data = pickle.dumps((cam_idx, frame_rgb))
+                    msg = struct.pack("Q", len(data)) + data
+                    conn.sendall(msg)
+                except queue.Empty:
+                    continue
         except Exception as e:
             print(f"[FrameServer] Error: {e}")
             conn.close()
-            # Loop kembali ke accept() untuk client baru
     server_socket.close()
 
 def format_time(seconds):
