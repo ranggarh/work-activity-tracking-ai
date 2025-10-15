@@ -4,26 +4,24 @@ import json
 from datetime import datetime
 from PIL import Image, ImageTk
 import threading
-import multiprocessing
-import queue
+import socket
+import pickle
+import struct
 import time
 
-
 class SchedulerGUI(tk.Tk):
-    def __init__(self, frame_queue=None, jobs=None, stop_events=None):
+    def __init__(self):
         super().__init__()
         self.title("Work Activity Tracking Scheduler by Puterako")
         self.geometry("1200x800")
-        
-        # Shared queue for frames
-        self.frame_queue = frame_queue
-        self.camera_labels = {}  # Store label widgets for each camera
-        self.running = True
-        
-        self.jobs = jobs 
-        self.stop_events = stop_events
 
-        
+        self.camera_labels = {}  # Store label widgets for each camera
+
+        # Socket client attributes
+        self.client_socket = None
+        self.frame_thread = None
+        self.running = False
+
         # Load config
         self.config_data = None
         self.schedule_templates = {}
@@ -71,11 +69,7 @@ class SchedulerGUI(tk.Tk):
         tk.Button(btn_frame, text="💾 Simpan Konfigurasi", command=self.save_config,
                  bg="#4CAF50", fg="white", font=("Arial", 11, "bold"), 
                  padx=20, pady=10).pack(side="right")
-        
-        # Start frame update thread if queue is provided
-        if self.frame_queue:
-            self.start_frame_update_thread()
-        
+
         # Handle window close
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -91,9 +85,14 @@ class SchedulerGUI(tk.Tk):
         tk.Label(control_frame, text="Live Camera Feeds", font=("Arial", 14, "bold"),
                 bg="#f0f0f0").pack(side="left", padx=10)
         
-        self.status_label = tk.Label(control_frame, text="● Streaming", 
-                                     font=("Arial", 10), fg="green", bg="#f0f0f0")
+        self.status_label = tk.Label(control_frame, text="● Disconnected", 
+                                     font=("Arial", 10), fg="red", bg="#f0f0f0")
         self.status_label.pack(side="right", padx=10)
+
+        btn_frame = tk.Frame(control_frame)
+        btn_frame.pack(side="right")
+        tk.Button(btn_frame, text="Connect", command=self.connect_to_server).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Disconnect", command=self.disconnect_from_server).pack(side="left", padx=5)
 
         # Canvas with scrollbar for camera grid
         canvas_frame = tk.Frame(live_tab)
@@ -120,6 +119,55 @@ class SchedulerGUI(tk.Tk):
         # Initialize camera display widgets
         self.init_camera_widgets()
 
+    def connect_to_server(self):
+        if self.running:
+            return
+        self.running = True
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.client_socket.connect(('localhost', 9999))
+            self.status_label.config(text="● Connected", fg="green")
+            self.frame_thread = threading.Thread(target=self.receive_frames, daemon=True)
+            self.frame_thread.start()
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot connect to server: {e}")
+            self.status_label.config(text="● Disconnected", fg="red")
+            self.running = False
+
+    def disconnect_from_server(self):
+        self.running = False
+        if self.client_socket:
+            try:
+                self.client_socket.close()
+            except:
+                pass
+            self.client_socket = None
+        self.status_label.config(text="● Disconnected", fg="red")
+
+    def receive_frames(self):
+        data = b""
+        payload_size = struct.calcsize("Q")
+        while self.running:
+            try:
+                while len(data) < payload_size:
+                    packet = self.client_socket.recv(4096)
+                    if not packet:
+                        return
+                    data += packet
+                packed_msg_size = data[:payload_size]
+                data = data[payload_size:]
+                msg_size = struct.unpack("Q", packed_msg_size)[0]
+                while len(data) < msg_size:
+                    data += self.client_socket.recv(4096)
+                frame_data = data[:msg_size]
+                data = data[msg_size:]
+                cam_idx, frame_rgb = pickle.loads(frame_data)
+                self.after(0, self.update_camera_display, cam_idx, frame_rgb)
+            except Exception as e:
+                print(f"[ERROR] Socket receive error: {e}")
+                self.disconnect_from_server()
+                break
+
     def init_camera_widgets(self):
         """Initialize display widgets for each camera"""
         if not self.config_data or "video_sources" not in self.config_data:
@@ -139,7 +187,6 @@ class SchedulerGUI(tk.Tk):
                                     padx=5, pady=5)
             cam_frame.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
             
-            # Ubah ukuran label video jadi kecil
             video_label = tk.Label(cam_frame, bg="black", width=320, height=180)
             video_label.pack()
             
@@ -155,30 +202,6 @@ class SchedulerGUI(tk.Tk):
         
         for i in range(cols):
             self.camera_container.columnconfigure(i, weight=1)
-    def start_frame_update_thread(self):
-        """Start background thread to update frames from queue"""
-        def update_frames():
-            last_frame_time = time.time()
-            while self.running:
-                try:
-                    # Get frame from queue (with timeout)
-                    cam_idx, frame_rgb = self.frame_queue.get(timeout=0.1)
-                    print(f"[DEBUG] Frame received for camera {cam_idx} at {time.strftime('%H:%M:%S')}")
-                    last_frame_time = time.time()
-                    # Update GUI in main thread
-                    self.after(0, self.update_camera_display, cam_idx, frame_rgb)
-                except queue.Empty:
-                    # Jika lebih dari 2 detik tidak ada frame, log
-                    if time.time() - last_frame_time > 2:
-                        print("[DEBUG] Tidak ada frame baru dalam 2 detik")
-                        last_frame_time = time.time()
-                    continue
-                except Exception as e:
-                    print(f"[ERROR] Error updating frame: {e}")
-                    continue
-
-        thread = threading.Thread(target=update_frames, daemon=True)
-        thread.start()
 
     def update_camera_display(self, cam_idx, frame_rgb):
         """Update camera display with new frame (runs in main thread)"""
@@ -187,13 +210,10 @@ class SchedulerGUI(tk.Tk):
             return
 
         try:
-            # Ambil ukuran label video
-            print(f"[DEBUG] frame_rgb type: {type(frame_rgb)}, shape: {getattr(frame_rgb, 'shape', None)}")
             video_label = self.camera_labels[cam_idx]['video']
             label_width = video_label.winfo_width() or 320
             label_height = video_label.winfo_height() or 180
 
-            # Resize frame dengan rasio yang sesuai (fit, tidak crop)
             img = Image.fromarray(frame_rgb)
             img = img.resize((label_width, label_height), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image=img)
@@ -206,10 +226,9 @@ class SchedulerGUI(tk.Tk):
                 fg="lime"
             )
             self.camera_labels[cam_idx]['last_update'] = datetime.now().timestamp()
-            print(f"[DEBUG] Frame displayed for camera {cam_idx} at {current_time}")
-
         except Exception as e:
             print(f"[ERROR] Error displaying frame for camera {cam_idx}: {e}")
+
     def create_template_tab(self):
         template_tab = tk.Frame(self.notebook)
         self.notebook.add(template_tab, text="📋 Template Jadwal")
@@ -734,22 +753,9 @@ class SchedulerGUI(tk.Tk):
             messagebox.showerror("Error", f"Gagal menyimpan!\n{e}")
 
     def on_closing(self):
-        self.running = False
-        # Graceful stop for tracking processes
-        if self.stop_events:
-            print("[INFO] Sending stop event to all tracking processes...")
-            for ev in self.stop_events:
-                ev.set()
-        # Destroy GUI first, then join in background
+        self.disconnect_from_server()
         self.destroy()
-        if self.jobs:
-            def join_jobs():
-                print("[INFO] Waiting for all tracking processes to finish...")
-                for p in self.jobs:
-                    p.join()
-                print("[INFO] All tracking processes finished.")
-            threading.Thread(target=join_jobs, daemon=True).start()
-
+        
 if __name__ == "__main__":
     app = SchedulerGUI()
     app.mainloop()

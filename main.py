@@ -7,12 +7,38 @@ import multiprocessing
 import json
 import signal
 
+import threading
+import socket
+import pickle
+import struct
+
 with open("config.json") as f:
     config = json.load(f)
 
 # =========================
 # Helper Functions
 # =========================
+
+def frame_server(frame_queue, host='localhost', port=9999):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((host, port))
+    server_socket.listen(1)
+    print(f"[FrameServer] Listening on {host}:{port}")
+    while True:
+        print("[FrameServer] Waiting for client connection...")
+        conn, addr = server_socket.accept()
+        print(f"[FrameServer] Client connected: {addr}")
+        try:
+            while True:
+                cam_idx, frame_rgb = frame_queue.get()
+                data = pickle.dumps((cam_idx, frame_rgb))
+                msg = struct.pack("Q", len(data)) + data
+                conn.sendall(msg)
+        except Exception as e:
+            print(f"[FrameServer] Error: {e}")
+            conn.close()
+            # Loop kembali ke accept() untuk client baru
+    server_socket.close()
 
 def format_time(seconds):
     minutes = int(seconds // 60)
@@ -369,6 +395,8 @@ if __name__ == "__main__":
     VIDEO_SOURCES = config["video_sources"]
     frame_queue = multiprocessing.Queue(maxsize=30)
     jobs = []
+    server_thread = threading.Thread(target=frame_server, args=(frame_queue,), daemon=True)
+    server_thread.start()
     for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
         zones = cam_config.get("zones", {})
         breaks = cam_config.get("breaks", [])
