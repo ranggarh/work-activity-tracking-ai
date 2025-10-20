@@ -137,7 +137,19 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
     for zone_id, zone_data in WORKSTATION_ZONES.items():
         x1, y1, x2, y2 = zone_data[:4]
         zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        # Default color abu-abu
         color = (100, 100, 100)
+        # Jika ada pekerja di zona ini, cek statusnya
+        if zone_id in zone_ownership:
+            person_id = zone_ownership[zone_id]
+            data = worker_data.get(person_id)
+            if data:
+                if data["status"] == "away":
+                    color = (0, 0, 255)      # Merah untuk away
+                elif data["status"] == "idle":
+                    color = (0, 165, 255)    # Oranye untuk idle
+                elif data["status"] == "working":
+                    color = (0, 255, 0)      # Hijau untuk working
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, zone_name, (x1 + 5, y1 + 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -167,7 +179,6 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
             empty_key = f"zone_{zone_id}_empty_since"
             if hasattr(draw_zones, "empty_times") and empty_key in draw_zones.empty_times:
                 draw_zones.empty_times[empty_key] = current_time
-
 # =========================
 # Tracking Function
 # =========================
