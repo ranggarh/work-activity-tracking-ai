@@ -1,89 +1,32 @@
 {
   "video_sources": [
     [
-      "http://root:vivo1234@192.168.2.247/video1s1.mjpg",
+      "rtsp://root:vivo1234@192.168.2.10/live1s1.sdp",
       {
         "zones": {
           "1": [
-            250,
-            50,
-            550,
-            550,
-            "Workstation B"
-          ]
-        },
-        "work_start": "08:00",
-        "work_end": "20:00",
-        "breaks": [
-          [
-            12,
-            0,
-            13,
-            0
-          ]
-        ],
-        "overtime": [
-          [
-            20,
-            0,
-            21,
-            0
-          ]
-        ]
-      }
-    ],
-    [
-      "sample-puterako.mp4",
-      {
-        "zones": {
-          "1": [
-            10,
-            50,
-            250,
-            550,
-            "Workstation E"
+            100,
+            130,
+            225,
+            350,
+            "Budi"
           ],
           "2": [
+            250,
+            130,
+            450,
             350,
-            50,
-            550,
-            550,
-            "Workstation F"
+            "Toni"
+          ],
+          "3": [
+            460,
+            130,
+            597,
+            350,
+            "Adam"
           ]
         },
-        "work_start": "08:00",
-        "work_end": "17:00",
-        "breaks": [
-          [
-            14,
-            0,
-            15,
-            0
-          ]
-        ],
-        "overtime": [
-          [
-            17,
-            0,
-            18,
-            0
-          ]
-        ]
-      }
-    ],
-    [
-      "sample-1.mp4",
-      {
-        "zones": {
-          "1": [
-            150,
-            100,
-            450,
-            450,
-            "Workstation C"
-          ]
-        },
-        "work_start": "08:00",
+        "work_start": "05:00",
         "work_end": "17:00",
         "breaks": [
           [
@@ -166,5 +109,5 @@
       ]
     }
   },
-  "date": "2025-10-15"
+  "date": "2025-11-04"
 }

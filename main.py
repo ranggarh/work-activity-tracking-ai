@@ -6,7 +6,8 @@ from datetime import datetime
 import multiprocessing
 import json
 import signal
-
+import pandas as pd
+import os
 import threading
 import socket
 import pickle
@@ -158,9 +159,9 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
             data = worker_data.get(person_id)
             if data:
                 info_texts = [
-                    ("WORKING", data["working_time"], (0, 255, 0)),
-                    ("IDLE", data["idle_time"], (0, 165, 255)),
-                    ("AWAY", data["away_time"], (0, 0, 255)),
+                    # ("WORKING", data["working_time"], (0, 255, 0)),
+                    # ("IDLE", data["idle_time"], (0, 165, 255)),
+                    # ("AWAY", data["away_time"], (0, 0, 255)),
                 ]
                 for i, (label, duration, color_info) in enumerate(info_texts):
                     text = f"{label}: {format_time(duration)}"
@@ -173,12 +174,65 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
             if empty_key not in draw_zones.empty_times:
                 draw_zones.empty_times[empty_key] = current_time
             empty_duration = current_time - draw_zones.empty_times[empty_key]
-            cv2.putText(frame, f"Empty: {format_time(empty_duration)}", (x1 + 5, y1 + 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 2)
+            # cv2.putText(frame, f"Empty: {format_time(empty_duration)}", (x1 + 5, y1 + 45),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 2)
         if zone_id in zone_ownership:
             empty_key = f"zone_{zone_id}_empty_since"
             if hasattr(draw_zones, "empty_times") and empty_key in draw_zones.empty_times:
                 draw_zones.empty_times[empty_key] = current_time
+
+
+def save_camera_summary_xlsx(cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data, filename):
+    import pandas as pd
+    import os
+
+    now_dt = datetime.now()
+    today_str = now_dt.strftime("%Y-%m-%d")
+    rows = []
+    for zone_id, zone_data in WORKSTATION_ZONES.items():
+        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        person_id = zone_ownership.get(zone_id)
+        if person_id and person_id in worker_data:
+            w = worker_data[person_id]
+            rows.append({
+                "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "Camera": cam_idx,
+                "Zone": zone_name,
+                "Working Time": format_time(w['working_time']),
+                "Idle Time": format_time(w['idle_time']),
+                "Away Time": format_time(w['away_time']),
+            })
+        else:
+            rows.append({
+                "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "Camera": cam_idx,
+                "Zone": zone_name,
+                "Working Time": "0s",
+                "Idle Time": "0s",
+                "Away Time": "0s",
+            })
+    df_new = pd.DataFrame(rows)
+
+    if not os.path.isfile(filename):
+        df_new.to_excel(filename, index=False)
+    else:
+        df_old = pd.read_excel(filename)
+        # Cek tanggal pada baris terakhir
+        if not df_old.empty:
+            last_date = str(df_old.iloc[-1]["Timestamp"])[:10]
+        else:
+            last_date = None
+        if last_date == today_str:
+            # Update baris yang ada (replace semua data hari ini)
+            # Filter baris yang bukan hari ini
+            df_old = df_old[df_old["Timestamp"].str[:10] != today_str]
+            df_result = pd.concat([df_old, df_new], ignore_index=True)
+            df_result.to_excel(filename, index=False)
+        else:
+            # Hari baru, tambah baris baru
+            df_result = pd.concat([df_old, df_new], ignore_index=True)
+            df_result.to_excel(filename, index=False)
+
 # =========================
 # Tracking Function
 # =========================
@@ -220,6 +274,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(f"output_tracking_cam{cam_idx}.mp4", fourcc, fps, (640, 360))
 
+    last_xlsx_update = time.time()
+    xlsx_filename = f"summary_cam{cam_idx}.xlsx"
+
     while True:
         if stop_event is not None and stop_event.is_set():
             print(f"[INFO] Camera {cam_idx} received stop event, exiting...")
@@ -241,7 +298,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
             fps_timer = current_time
 
         draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_time)
-        results = model.track(frame, conf=0.5, persist=True, verbose=False)
+        results = model.track(frame, conf=0.2, persist=True, verbose=False)
         active_persons = set()
 
         for result in results:
@@ -369,7 +426,11 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         out.write(frame)
-        
+
+        if time.time() - last_xlsx_update > 300:  # 300 detik = 5 menit
+            save_camera_summary_xlsx(cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data, xlsx_filename)
+            last_xlsx_update = time.time()
+
         # Send frame to queue (non-blocking)
         try:
             if not frame_queue.full():
