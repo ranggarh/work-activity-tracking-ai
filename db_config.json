@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "database": "worker_tracking",
+  "user": "postgres", 
+  "password": "admin123",
+  "port": 5432
+}

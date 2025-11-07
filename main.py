@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import multiprocessing
 import json
 import signal
@@ -13,6 +13,8 @@ import socket
 import pickle
 import struct
 import queue
+from database import DatabaseManager
+
 with open("config.json") as f:
     config = json.load(f)
 
@@ -190,107 +192,67 @@ def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_tim
         cv2.putText(frame, status_text, (text_x, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        y_offset += 25  # Move down for next zone's info       
-def save_camera_summary_xlsx(cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data, filename):
-    import pandas as pd
-    import os
-    from openpyxl import load_workbook
+        y_offset += 25  # Move down for next zone's info
 
-    now_dt = datetime.now()
-    today_str = now_dt.strftime("%Y-%m-%d")
-
-    # Summary sheet data (tanpa kolom Status)
-    summary_rows = []
-    for zone_id, zone_data in WORKSTATION_ZONES.items():
-        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
-        person_id = zone_ownership.get(zone_id)
-        if person_id and person_id in worker_data:
-            w = worker_data[person_id]
-            summary_rows.append({
-                "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "Camera": cam_idx,
-                "Zone": zone_name,
-                "Working Time": format_time(w['working_time']),
-                "Idle Time": format_time(w['idle_time']),
-                "Away Time": format_time(w['away_time'])
-            })
-        else:
-            summary_rows.append({
-                "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "Camera": cam_idx,
-                "Zone": zone_name,
-                "Working Time": "0s",
-                "Idle Time": "0s",
-                "Away Time": "0s"
-            })
-
-    # Log data - berdasarkan flag bukan status
-    log_rows = []
-    for zone_id, zone_data in WORKSTATION_ZONES.items():
-        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
-        person_id = zone_ownership.get(zone_id)
-        if person_id and person_id in worker_data:
-            data = worker_data[person_id]
-            
-            # Check untuk log "Left Zone"
-            if data.get("just_left_zone", False):
-                log_rows.append({
-                    "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "Camera": cam_idx,
-                    "Zone": zone_name,
-                    "Event": "Left Zone",
-                    "Last Seen": datetime.fromtimestamp(data.get("left_zone_time", time.time())).strftime("%Y-%m-%d %H:%M:%S"),
-                    "Status Change": "working → away"
-                })
-                # Reset flag setelah dicatat
-                data["just_left_zone"] = False
-                
-            # Check untuk log "Returned to Zone"
-            if data.get("just_returned_zone", False):
-                log_rows.append({
-                    "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "Camera": cam_idx,
-                    "Zone": zone_name,
-                    "Event": "Returned to Zone",
-                    "Last Seen": datetime.fromtimestamp(data.get("returned_zone_time", time.time())).strftime("%Y-%m-%d %H:%M:%S"),
-                    "Status Change": "away → working"
-                })
-                # Reset flag setelah dicatat
-                data["just_returned_zone"] = False
-
-    df_summary = pd.DataFrame(summary_rows)
-    df_log = pd.DataFrame(log_rows)
-
+def log_activity_to_db(db_manager, cam_idx, zone_name, event, status_change, last_seen_timestamp):
+    """Log activity to database immediately"""
     try:
-        if not os.path.isfile(filename):
-            # Create new file with both sheets
-            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                df_summary.to_excel(writer, sheet_name='Summary', index=False)
-                df_log.to_excel(writer, sheet_name='Logs', index=False)
-        else:
-            # Load existing logs if file exists
-            try:
-                existing_logs = pd.read_excel(filename, sheet_name='Logs', engine='openpyxl')
-                df_log = pd.concat([existing_logs, df_log], ignore_index=True)
-            except:
-                pass
-
-            # Write both sheets to file
-            with pd.ExcelWriter(filename, engine='openpyxl', mode='w') as writer:
-                df_summary.to_excel(writer, sheet_name='Summary', index=False)
-                df_log.to_excel(writer, sheet_name='Logs', index=False)
-
-        print(f"[INFO] Successfully updated Excel file at {now_dt.strftime('%H:%M:%S')}")
+        db_manager.log_activity(cam_idx, zone_name, event, status_change, last_seen_timestamp)
     except Exception as e:
-        print(f"[ERROR] Failed to update Excel file: {str(e)}")
+        print(f"[ERROR] Failed to log activity to DB: {e}")
+
+def save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data):
+    """Save hourly summary to database"""
+    try:
+        now = datetime.now()
+        summary_hour = now.replace(minute=0, second=0, microsecond=0)
+        
+        zone_summaries = {}
+        for zone_id, zone_data in WORKSTATION_ZONES.items():
+            zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+            person_id = zone_ownership.get(zone_id)
+            
+            if person_id and person_id in worker_data:
+                w = worker_data[person_id]
+                zone_summaries[zone_name] = {
+                    'working_time': w['working_time'],
+                    'idle_time': w['idle_time'],
+                    'away_time': w['away_time'],
+                    'working_time_formatted': format_time(w['working_time']),
+                    'idle_time_formatted': format_time(w['idle_time']),
+                    'away_time_formatted': format_time(w['away_time'])
+                }
+            else:
+                zone_summaries[zone_name] = {
+                    'working_time': 0,
+                    'idle_time': 0,
+                    'away_time': 0,
+                    'working_time_formatted': "0s",
+                    'idle_time_formatted': "0s",
+                    'away_time_formatted': "0s"
+                }
+        
+        db_manager.save_summary(cam_idx, zone_summaries, summary_hour)
+        print(f"[INFO] Hourly summary saved to DB for Camera {cam_idx} at {summary_hour}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to save summary to DB: {e}")
+
 # =========================
 # Tracking Function
 # =========================
 
 def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime, frame_queue, stop_event=None):
     """
-    Modified tracking function that sends frames to queue instead of showing windows
+    Modified tracking function with PostgreSQL logging
     """
+    # Initialize database connection
+    try:
+        db_manager = DatabaseManager()
+    except Exception as e:
+        print(f"[ERROR] Cannot connect to database: {e}")
+        return
+    
     # Keypoints & Thresholds
     HAND_KEYPOINTS = [9, 10]
     SHOULDER_KEYPOINTS = [5, 6]
@@ -324,8 +286,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(f"output_tracking_cam{cam_idx}.mp4", fourcc, fps, (640, 360))
 
-    last_xlsx_update = time.time()
-    xlsx_filename = f"summary_cam{cam_idx}.xlsx"
+    # Changed from 5 minutes to 1 hour (3600 seconds)
+    last_summary_update = time.time()
+    SUMMARY_UPDATE_INTERVAL = 300  # 5 minutes
 
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -407,9 +370,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         "track_ids": {track_id},
                         "previous_status": "working",
                         "status_change_time": current_time,
-                        "was_in_zone": True,  # Track apakah sebelumnya di zona
-                        "just_left_zone": False,  # Flag untuk log left zone
-                        "just_returned_zone": False,  # Flag untuk log returned zone
+                        "was_in_zone": True,
+                        "just_left_zone": False,
+                        "just_returned_zone": False,
                         "left_zone_time": current_time,
                         "returned_zone_time": current_time,
                     }
@@ -418,6 +381,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 data = worker_data[person_id]
                 data["last_seen"] = current_time
                 zone_id = person_to_zone.get(person_id)
+                zone_name = WORKSTATION_ZONES.get(zone_id, [None, None, None, None, f"Zone {zone_id}"])[4]
                 in_zone = is_in_zone(center, zone_id, WORKSTATION_ZONES)
                 activity_score = calculate_activity_score(
                     keypoints, 
@@ -429,22 +393,33 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                     VISIBILITY_THRESHOLD
                 )
                 time_delta = current_time - data["last_update"]
+                
                 if work_active and not break_active:
                     if not in_zone:
-                        # Jika baru keluar zona
+                        # Jika baru keluar zona - LOG IMMEDIATELY
                         if data.get("was_in_zone", True):
                             data["just_left_zone"] = True
                             data["left_zone_time"] = current_time
                             data["was_in_zone"] = False
+                            # Log to database immediately
+                            log_activity_to_db(
+                                db_manager, cam_idx, zone_name, "Left Zone", 
+                                "working → away", current_time
+                            )
                         
                         data["status"] = "away"
                         data["away_time"] += time_delta
                     else:  # Dalam zone
-                        # Jika baru kembali ke zona
+                        # Jika baru kembali ke zona - LOG IMMEDIATELY
                         if not data.get("was_in_zone", True):
                             data["just_returned_zone"] = True
                             data["returned_zone_time"] = current_time
                             data["was_in_zone"] = True
+                            # Log to database immediately
+                            log_activity_to_db(
+                                db_manager, cam_idx, zone_name, "Returned to Zone", 
+                                "away → working", current_time
+                            )
                         
                         # Cek aktivitas
                         if activity_score > ACTIVITY_THRESHOLD:
@@ -473,29 +448,17 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
 
         total_workers = len(worker_data)
 
-                # Create black overlay on right side
-        # overlay = frame.copy()
-        # overlay_width = frame.shape[1]  # Full width overlay
-        # cv2.rectangle(overlay, 
-        #              (0, 5),  # Start from left
-        #              (frame.shape[1], 100),  # Full width to right edge
-        #              (0, 0, 0), -1)
-        # cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        
         overlay = frame.copy()
-        overlay_width = frame.shape[1] // 2  # Half of frame width
+        overlay_width = frame.shape[1] // 2
         cv2.rectangle(overlay, 
-                     (0, 30),               # Start from left edge, 30px from top
-                     (overlay_width, 110),   # Half width, height to cover all text
+                     (0, 30),
+                     (overlay_width, 110),
                      (0, 0, 0), -1)
-        # Apply transparency
-        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)  # 30% overlay opacity
+        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
         
-        
-        # Draw text on overlay - align from left
         now_dt = datetime.now()
         timestamp_str = now_dt.strftime("%H:%M:%S")
-        x_pos = 10  # Start text from left edge
+        x_pos = 10
         
         cv2.putText(frame, f"Camera {cam_idx} [{timestamp_str}]", 
                    (x_pos, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
@@ -504,12 +467,12 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
         cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", 
                    (x_pos, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
         
-        
         out.write(frame)
 
-        if time.time() - last_xlsx_update > 300:  # 300 detik = 5 menit
-            save_camera_summary_xlsx(cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data, xlsx_filename)
-            last_xlsx_update = time.time()
+        # Save hourly summary instead of 5-minute updates
+        if time.time() - last_summary_update > SUMMARY_UPDATE_INTERVAL:
+            save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data)
+            last_summary_update = time.time()
 
         # Send frame to queue (non-blocking)
         try:
@@ -524,6 +487,11 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
 
     cap.release()
     out.release()
+    
+    # Final summary save before closing
+    save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data)
+    db_manager.close()
+    
     print(f"\nCamera {cam_idx} Summary:")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")
