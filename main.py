@@ -244,7 +244,7 @@ def save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_owner
 
 def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_start, work_end, overtime, frame_queue, stop_event=None):
     """
-    Modified tracking function with PostgreSQL logging
+    Fixed tracking function with proper sequential logging
     """
     # Initialize database connection
     try:
@@ -260,8 +260,20 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     HIP_KEYPOINTS = [11, 12]
     ACTIVITY_THRESHOLD = 5
     IDLE_TIMEOUT = 3
-    AWAY_TIMEOUT = 5
     VISIBILITY_THRESHOLD = 0.5
+    
+    # Get away timeout from config (in minutes, convert to seconds)
+    config_away_timeout = config["video_sources"][cam_idx-1][1].get("away_timeout", 5)
+    AWAY_TIMEOUT = config_away_timeout * 60  # Convert minutes to seconds
+    
+    # Threshold untuk return
+    LOG_RETURN_THRESHOLD = 15  # Log "Returned to Zone" setelah 15 detik STABIL dalam zona
+
+    print(f"\n=== Camera {cam_idx} ===")
+    print(f"🔌 Connecting to video source: {VIDEO_SOURCE}")
+    print(f"⏱️ Away Timeout: {config_away_timeout} minutes ({AWAY_TIMEOUT} seconds)")
+    print(f"🔄 Log Return Threshold: {LOG_RETURN_THRESHOLD} seconds")
+    print(f"📋 Sequential Logging: Return only after Left has been logged")
 
     model = YOLO("yolov8n-pose.pt")
     worker_data = {}
@@ -270,8 +282,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     track_to_person = {}
     next_person_id = 1
 
-    print(f"\n=== Camera {cam_idx} ===")
-    print(f"🔌 Connecting to video source: {VIDEO_SOURCE}")
     cap = cv2.VideoCapture(VIDEO_SOURCE)
     if VIDEO_SOURCE.startswith("rtsp://") or VIDEO_SOURCE.startswith("http://"):
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -286,7 +296,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(f"output_tracking_cam{cam_idx}.mp4", fourcc, fps, (640, 360))
 
-    # Changed from 5 minutes to 1 hour (3600 seconds)
     last_summary_update = time.time()
     SUMMARY_UPDATE_INTERVAL = 300  # 5 minutes
 
@@ -321,6 +330,8 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
             for idx, track_id in enumerate(track_ids):
                 keypoints = result.keypoints.xy[idx].cpu().numpy()
                 visibility = result.keypoints.conf[idx].cpu().numpy()
+                
+                # Draw keypoints and skeleton
                 for i, (x, y) in enumerate(keypoints):
                     if visibility[i] > 0.5:
                         cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 0), -1)
@@ -332,6 +343,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         pt1 = tuple(map(int, keypoints[a]))
                         pt2 = tuple(map(int, keypoints[b]))
                         cv2.line(frame, pt1, pt2, (255, 0, 0), 2)
+                
                 if not is_valid_detection(visibility, HEAD_KEYPOINT, VISIBILITY_THRESHOLD):
                     continue
                 center = get_person_center(keypoints, visibility, HEAD_KEYPOINT, SHOULDER_KEYPOINTS, HIP_KEYPOINTS, VISIBILITY_THRESHOLD)
@@ -370,14 +382,19 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         "track_ids": {track_id},
                         "previous_status": "working",
                         "status_change_time": current_time,
+                        
+                        # Enhanced fields for sequential logging
+                        "in_zone_start_time": current_time,
+                        "left_zone_logged": False,
+                        "returned_zone_logged": False,
                         "was_in_zone": True,
-                        "just_left_zone": False,
-                        "just_returned_zone": False,
-                        "left_zone_time": current_time,
-                        "returned_zone_time": current_time,
+                        "consecutive_in_zone_time": 0,
+                        "can_log_return": False,
+                        "last_left_log_time": None,  # NEW: Track kapan terakhir log "Left Zone"
                     }
                 else:
                     worker_data[person_id]["track_ids"].add(track_id)
+                
                 data = worker_data[person_id]
                 data["last_seen"] = current_time
                 zone_id = person_to_zone.get(person_id)
@@ -396,32 +413,47 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 
                 if work_active and not break_active:
                     if not in_zone:
-                        # Jika baru keluar zona - LOG IMMEDIATELY
-                        if data.get("was_in_zone", True):
-                            data["just_left_zone"] = True
-                            data["left_zone_time"] = current_time
+                        # Person keluar zona
+                        if data["status"] != "away":
+                            # Baru mulai away
+                            data["status"] = "away"
+                            # JANGAN reset flags jika sudah pernah log "Left Zone"
+                            if not data["left_zone_logged"]:
+                                data["left_zone_logged"] = False
+                                data["returned_zone_logged"] = False
+                                data["can_log_return"] = False
                             data["was_in_zone"] = False
-                            # Log to database immediately
-                            log_activity_to_db(
-                                db_manager, cam_idx, zone_name, "Left Zone", 
-                                "working → away", current_time
-                            )
+                            # Reset in-zone tracking
+                            data["in_zone_start_time"] = None
+                            data["consecutive_in_zone_time"] = 0
                         
-                        data["status"] = "away"
                         data["away_time"] += time_delta
-                    else:  # Dalam zone
-                        # Jika baru kembali ke zona - LOG IMMEDIATELY
-                        if not data.get("was_in_zone", True):
-                            data["just_returned_zone"] = True
-                            data["returned_zone_time"] = current_time
-                            data["was_in_zone"] = True
-                            # Log to database immediately
-                            log_activity_to_db(
-                                db_manager, cam_idx, zone_name, "Returned to Zone", 
-                                "away → working", current_time
-                            )
                         
-                        # Cek aktivitas
+                    else:  # Person dalam zona
+                        # PERBAIKAN: Reset status away jika masuk zona
+                        if data["status"] == "away":
+                            data["status"] = "working"  # Reset dari away ke working
+                            print(f"[DEBUG] {zone_name}: Status changed from away to working")
+                        
+                        # Update in-zone tracking
+                        if data["in_zone_start_time"] is None:
+                            # Baru masuk zona, mulai tracking
+                            data["in_zone_start_time"] = current_time
+                            data["consecutive_in_zone_time"] = 0
+                            data["was_in_zone"] = True
+                            
+                            # PENTING: Cek apakah sudah pernah log "Left Zone" sebelumnya
+                            if data["left_zone_logged"] and not data["returned_zone_logged"]:
+                                data["can_log_return"] = True
+                                print(f"[DEBUG] {zone_name}: Person returned to zone, can_log_return set to True")
+                            
+                            print(f"[DEBUG] {zone_name}: Started in-zone tracking")
+                            print(f"[DEBUG] {zone_name}: Flags - can_log_return: {data['can_log_return']}, left_logged: {data['left_zone_logged']}, returned_logged: {data['returned_zone_logged']}")
+                        else:
+                            # Masih dalam zona, tambah waktu consecutive
+                            data["consecutive_in_zone_time"] = current_time - data["in_zone_start_time"]
+                        
+                        # Update status berdasarkan aktivitas
                         if activity_score > ACTIVITY_THRESHOLD:
                             data["status"] = "working"
                             data["working_time"] += time_delta
@@ -431,28 +463,101 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                                 data["status"] = "idle"
                                 data["idle_time"] += time_delta
                             else:
+                                data["status"] = "working"
                                 data["working_time"] += time_delta
+                        
+                        # ENHANCED DEBUGGING untuk log "Returned to Zone"
+                        debug_info = {
+                            'returned_logged': data["returned_zone_logged"],
+                            'can_log_return': data["can_log_return"],
+                            'left_logged': data["left_zone_logged"],
+                            'consecutive_time': data["consecutive_in_zone_time"],
+                            'threshold': LOG_RETURN_THRESHOLD,
+                            'status': data["status"],
+                            'in_working_idle': data["status"] in ["working", "idle"],
+                            'last_left_time': data.get("last_left_log_time")
+                        }
+                        
+                        # Print debug setiap 3 detik untuk melihat progress
+                        if frame_count % 90 == 0:  # Sekitar 3 detik pada 30 FPS
+                            print(f"[DEBUG] {zone_name} Detailed Status: {debug_info}")
+                        
+                        # Log "Returned to Zone" dengan kondisi yang lebih jelas
+                        can_log_conditions = [
+                            not data["returned_zone_logged"],  # Belum pernah log return
+                            data["can_log_return"],            # Sudah pernah log "Left Zone"
+                            data["consecutive_in_zone_time"] >= LOG_RETURN_THRESHOLD,  # Sudah stabil 15 detik
+                            data["status"] in ["working", "idle"]  # Status working/idle
+                        ]
+                        
+                        # Debug kondisi individual jika threshold tercapai
+                        if data["consecutive_in_zone_time"] >= LOG_RETURN_THRESHOLD and not data["returned_zone_logged"]:
+                            print(f"[DEBUG] {zone_name} Conditions Check:")
+                            print(f"  - Not returned_logged: {not data['returned_zone_logged']}")
+                            print(f"  - Can log return: {data['can_log_return']}")
+                            print(f"  - Time >= threshold: {data['consecutive_in_zone_time']:.1f} >= {LOG_RETURN_THRESHOLD}")
+                            print(f"  - Status working/idle: {data['status']} in ['working', 'idle'] = {data['status'] in ['working', 'idle']}")
+                            print(f"  - ALL CONDITIONS MET: {all(can_log_conditions)}")
+                        
+                        if all(can_log_conditions):
+                            log_activity_to_db(
+                                db_manager, cam_idx, zone_name, "Returned to Zone", 
+                                "away → working", current_time
+                            )
+                            data["returned_zone_logged"] = True
+                            data["can_log_return"] = False  # Reset permission
+                            stable_seconds = data["consecutive_in_zone_time"]
+                            print(f"[LOG] {zone_name}: Returned to Zone after {stable_seconds:.1f}s stable in zone")
+
                 data["last_pose"] = keypoints
                 data["last_visibility"] = visibility
                 data["last_update"] = current_time
                 data["center"] = center
 
+        # Handle persons not currently detected - PERBAIKAN UTAMA
         current_time = time.time()
         for person_id, data in worker_data.items():
             if person_id not in active_persons:
+                # Reset in-zone tracking saat tidak terdeteksi
+                data["in_zone_start_time"] = None
+                data["consecutive_in_zone_time"] = 0
+                
+                # Gunakan AWAY_TIMEOUT untuk menentukan kapan log "Left Zone"
                 if current_time - data["last_seen"] > AWAY_TIMEOUT:
                     if data["status"] != "away":
+                        # Person sudah tidak terdeteksi lebih dari AWAY_TIMEOUT
                         data["status"] = "away"
+                        # JANGAN reset flags yang sudah ada
+                        data["was_in_zone"] = False
+                    
                     data["away_time"] += current_time - data["last_update"]
+                    
+                    # Log "Left Zone" LANGSUNG setelah AWAY_TIMEOUT terlewati
+                    if not data["left_zone_logged"]:
+                        zone_id = person_to_zone.get(person_id)
+                        zone_name = WORKSTATION_ZONES.get(zone_id, [None, None, None, None, f"Zone {zone_id}"])[4]
+                        log_activity_to_db(
+                            db_manager, cam_idx, zone_name, "Left Zone", 
+                            "working → away", current_time
+                        )
+                        data["left_zone_logged"] = True
+                        data["can_log_return"] = True  # PENTING: Izinkan log return
+                        data["returned_zone_logged"] = False  # Reset returned flag
+                        data["last_left_log_time"] = current_time  # Track waktu log
+                        away_minutes = (current_time - data["last_seen"]) / 60
+                        print(f"[LOG] {zone_name}: Left Zone after {away_minutes:.1f} minutes away")
+                        print(f"[DEBUG] {zone_name}: can_log_return set to True, returned_zone_logged reset to False")
+                
                 data["last_update"] = current_time
 
+        # Display info dengan debugging tambahan
         total_workers = len(worker_data)
 
         overlay = frame.copy()
         overlay_width = frame.shape[1] // 2
         cv2.rectangle(overlay, 
                      (0, 30),
-                     (overlay_width, 110),
+                     (overlay_width, 150),  # Tinggi diperbesar untuk debug info
                      (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
         
@@ -464,12 +569,14 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                    (x_pos, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
         cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(WORKSTATION_ZONES)}", 
                    (x_pos, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-        cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", 
+        cv2.putText(frame, f"FPS: {fps_display:.2f} | Away Timeout: {config_away_timeout}m", 
                    (x_pos, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        cv2.putText(frame, f"Return Threshold: {LOG_RETURN_THRESHOLD}s", 
+                   (x_pos, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
         
         out.write(frame)
 
-        # Save hourly summary instead of 5-minute updates
+        # Save summary every 5 minutes
         if time.time() - last_summary_update > SUMMARY_UPDATE_INTERVAL:
             save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data)
             last_summary_update = time.time()
@@ -492,7 +599,11 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data)
     db_manager.close()
     
+    # Print summary dengan debug info tambahan
     print(f"\nCamera {cam_idx} Summary:")
+    print(f"Away Timeout : {config_away_timeout} minutes")
+    print(f"Log Return Threshold: {LOG_RETURN_THRESHOLD} seconds")
+    print(f"Sequential Logging: Enabled")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")
     for zone_id, zone_data in WORKSTATION_ZONES.items():
@@ -504,13 +615,19 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
             print(f"  Working Time: {format_time(w['working_time'])}")
             print(f"  Idle Time   : {format_time(w['idle_time'])}")
             print(f"  Away Time   : {format_time(w['away_time'])}")
+            print(f"  Can Log Return: {w.get('can_log_return', False)}")
+            print(f"  Left Zone Logged: {w.get('left_zone_logged', False)}")
+            print(f"  Returned Zone Logged: {w.get('returned_zone_logged', False)}")
+            if w.get('last_left_log_time'):
+                left_time = datetime.fromtimestamp(w['last_left_log_time']).strftime("%H:%M:%S")
+                print(f"  Last Left Log Time: {left_time}")
         else:
             print(f"Zone {zone_name}:")
             print(f"  Working Time: 0s")
             print(f"  Idle Time   : 0s")
             print(f"  Away Time   : 0s")
     print("="*60)
-    
+     
 def terminate_all(jobs):
     for p in jobs:
         if p.is_alive():
@@ -527,12 +644,15 @@ if __name__ == "__main__":
     jobs = []
     server_thread = threading.Thread(target=frame_server, args=(frame_queue,), daemon=True)
     server_thread.start()
+    
     for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
         zones = cam_config.get("zones", {})
         breaks = cam_config.get("breaks", [])
         work_start = cam_config.get("work_start", "")
         work_end = cam_config.get("work_end", "")
         overtime = cam_config.get("overtime", [])
+        # away_timeout akan diambil langsung dari cam_config di dalam run_tracking
+        
         p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime, frame_queue))
         p.start()
         jobs.append(p)

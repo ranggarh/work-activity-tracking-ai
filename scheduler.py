@@ -301,7 +301,7 @@ class SchedulerGUI(tk.Tk):
         toolbar = tk.Frame(camera_tab)
         toolbar.pack(fill="x", padx=10, pady=5)
         tk.Button(toolbar, text="➕ Tambah Kamera", command=self.add_camera_row,
-                 bg="#2196F3", fg="white").pack(side="left", padx=5)
+                bg="#2196F3", fg="white").pack(side="left", padx=5)
 
         # Scrollable frame untuk kamera
         canvas = tk.Canvas(camera_tab)
@@ -334,7 +334,8 @@ class SchedulerGUI(tk.Tk):
                     work_end = config.get("work_end", "")
                     breaks = config.get("breaks", [])
                     overtime = config.get("overtime", [])
-                    self.add_camera_row(src, zones, work_start, work_end, breaks, overtime)
+                    away_timeout = config.get("away_timeout", 5)  # Default 5 menit
+                    self.add_camera_row(src, zones, work_start, work_end, breaks, overtime, away_timeout)
         else:
             self.add_camera_row()
     
@@ -385,12 +386,12 @@ class SchedulerGUI(tk.Tk):
             btn = None
         ot_entries.append((start, end, btn))
 
-    def add_camera_row(self, src_val="", zones=None, work_start="", work_end="", breaks=None, overtime=None):
+    def add_camera_row(self, src_val="", zones=None, work_start="", work_end="", breaks=None, overtime=None, away_timeout=5):
         row_num = len(self.camera_entries)
         
         # Main frame untuk kamera
         cam_frame = tk.LabelFrame(self.camera_frame, text=f"Kamera {row_num + 1}", 
-                                  padx=10, pady=10, relief="groove", bd=2)
+                                padx=10, pady=10, relief="groove", bd=2)
         cam_frame.pack(fill="x", padx=5, pady=5)
 
         # Row 1: Source dan Template
@@ -408,10 +409,8 @@ class SchedulerGUI(tk.Tk):
         template_combo['values'] = ["-- Custom --"] + list(self.schedule_templates.keys())
         template_combo.current(0)
         template_combo.pack(side="left", padx=5)
-        template_combo.bind('<<ComboboxSelected>>', 
-                          lambda e, entries=(None,): self.apply_template(e, entries))
 
-        # Row 2: Jam Kerja
+        # Row 2: Jam Kerja dan Away Timeout
         row2 = tk.Frame(cam_frame)
         row2.pack(fill="x", pady=5)
         
@@ -424,6 +423,17 @@ class SchedulerGUI(tk.Tk):
         work_end_entry = tk.Entry(row2, width=10)
         work_end_entry.pack(side="left", padx=5)
         work_end_entry.insert(0, work_end)
+
+        # Tambahan: Away Timeout
+        tk.Label(row2, text="Away Timeout:", width=12, anchor="w").pack(side="left", padx=(20, 0))
+        away_timeout_entry = tk.Entry(row2, width=8)
+        away_timeout_entry.pack(side="left", padx=5)
+        away_timeout_entry.insert(0, str(away_timeout))
+        tk.Label(row2, text="menit", font=("Arial", 8)).pack(side="left")
+        
+        # Helper text
+        tk.Label(row2, text="(toleransi hilang sebelum dihitung away)", 
+                font=("Arial", 8), fg="gray").pack(side="left", padx=(5, 0))
 
         # Row 3: Istirahat
         row3 = tk.Frame(cam_frame)
@@ -482,18 +492,18 @@ class SchedulerGUI(tk.Tk):
 
         # Button hapus
         tk.Button(cam_frame, text="🗑️ Hapus Kamera", 
-                 command=lambda: self.remove_camera(cam_frame),
-                 bg="#f44336", fg="white").pack(anchor="e", pady=5)
+                command=lambda: self.remove_camera(cam_frame),
+                bg="#f44336", fg="white").pack(anchor="e", pady=5)
 
         # Update template combo binding with actual entries
         template_combo.bind('<<ComboboxSelected>>', 
-                          lambda e: self.apply_template(e, {
-                              'work_start': work_start_entry,
-                              'work_end': work_end_entry,
-                              'breaks': break_entries,
-                              'overtime': ot_entries,
-                              'template': template_combo
-                          }))
+                        lambda e: self.apply_template(e, {
+                            'work_start': work_start_entry,
+                            'work_end': work_end_entry,
+                            'breaks': break_entries,
+                            'overtime': ot_entries,
+                            'template': template_combo
+                        }))
 
         self.camera_entries.append({
             'frame': cam_frame,
@@ -503,7 +513,8 @@ class SchedulerGUI(tk.Tk):
             'work_end': work_end_entry,
             'breaks': break_entries,
             'overtime': ot_entries,
-            'zones': zone_text
+            'zones': zone_text,
+            'away_timeout': away_timeout_entry  # Tambahan
         })
 
     def remove_break_entry(self, parent, break_entries, idx):
@@ -695,6 +706,14 @@ class SchedulerGUI(tk.Tk):
                 work_start = entry['work_start'].get().strip()
                 work_end = entry['work_end'].get().strip()
                 
+                # Parse away timeout
+                try:
+                    away_timeout = int(entry['away_timeout'].get().strip())
+                    if away_timeout < 1:
+                        away_timeout = 5  # Default minimum 1 menit
+                except:
+                    away_timeout = 5  # Default 5 menit
+                
                 # Parse breaks
                 breaks = []
                 for start, end, *_ in entry['breaks']:
@@ -735,7 +754,8 @@ class SchedulerGUI(tk.Tk):
                     "work_start": work_start,
                     "work_end": work_end,
                     "breaks": breaks,
-                    "overtime": overtime
+                    "overtime": overtime,
+                    "away_timeout": away_timeout  # Tambahan
                 }])
             
             config = {
