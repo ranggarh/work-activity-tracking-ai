@@ -133,106 +133,156 @@ def is_valid_detection(visibility, HEAD_KEYPOINT, VISIBILITY_THRESHOLD):
     shoulders_visible = (visibility[5] > VISIBILITY_THRESHOLD and visibility[6] > VISIBILITY_THRESHOLD)
     return head_visible or shoulders_visible
 
-def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_time):
+def draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_time, AWAY_TIMEOUT):
     current_time = time.time()
+    
+    # Draw time info in top right corner
+    y_offset = 30  # Starting y position
+    x_position = frame.shape[1] - 20  # 20 pixels from right edge
+    
     for zone_id, zone_data in WORKSTATION_ZONES.items():
         x1, y1, x2, y2 = zone_data[:4]
         zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        
         # Default color abu-abu
         color = (100, 100, 100)
-        # Jika ada pekerja di zona ini, cek statusnya
+        
+        # Update warna berdasarkan status terbaru
         if zone_id in zone_ownership:
             person_id = zone_ownership[zone_id]
             data = worker_data.get(person_id)
             if data:
-                if data["status"] == "away":
+                current_time = time.time()
+                # Cek jika sudah away berdasarkan last_seen
+                if current_time - data["last_seen"] > AWAY_TIMEOUT:
+                    color = (0, 0, 255)      # Merah untuk away
+                # Jika belum away, gunakan status normal
+                elif data["status"] == "away":
                     color = (0, 0, 255)      # Merah untuk away
                 elif data["status"] == "idle":
                     color = (0, 165, 255)    # Oranye untuk idle
                 elif data["status"] == "working":
                     color = (0, 255, 0)      # Hijau untuk working
+
+        # Draw zone box
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        
+        # Draw zone name inside box
         cv2.putText(frame, zone_name, (x1 + 5, y1 + 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # Draw time info in top right corner
         if zone_id in zone_ownership:
             person_id = zone_ownership[zone_id]
             data = worker_data.get(person_id)
             if data:
-                info_texts = [
-                    # ("WORKING", data["working_time"], (0, 255, 0)),
-                    # ("IDLE", data["idle_time"], (0, 165, 255)),
-                    # ("AWAY", data["away_time"], (0, 0, 255)),
-                ]
-                for i, (label, duration, color_info) in enumerate(info_texts):
-                    text = f"{label}: {format_time(duration)}"
-                    cv2.putText(frame, text, (x1 + 5, y1 + 45 + i*20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_info, 2)
+                status_text = f"{zone_name} | W: {format_time(data['working_time'])} | I: {format_time(data['idle_time'])} | A: {format_time(data['away_time'])}"
         else:
-            empty_key = f"zone_{zone_id}_empty_since"
-            if not hasattr(draw_zones, "empty_times"):
-                draw_zones.empty_times = {}
-            if empty_key not in draw_zones.empty_times:
-                draw_zones.empty_times[empty_key] = current_time
-            empty_duration = current_time - draw_zones.empty_times[empty_key]
-            # cv2.putText(frame, f"Empty: {format_time(empty_duration)}", (x1 + 5, y1 + 45),
-            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 2)
-        if zone_id in zone_ownership:
-            empty_key = f"zone_{zone_id}_empty_since"
-            if hasattr(draw_zones, "empty_times") and empty_key in draw_zones.empty_times:
-                draw_zones.empty_times[empty_key] = current_time
+            status_text = f"{zone_name} | W: 0s | I: 0s | A: 0s"
 
+        # Get text size to calculate right alignment position
+        (text_width, text_height), _ = cv2.getTextSize(status_text, 
+                                                      cv2.FONT_HERSHEY_SIMPLEX, 
+                                                      0.6, 2)
+        text_x = x_position - text_width  # Align text to right
 
+        # Draw text on the transparent overlay
+        cv2.putText(frame, status_text, (text_x, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        y_offset += 25  # Move down for next zone's info       
 def save_camera_summary_xlsx(cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data, filename):
     import pandas as pd
     import os
+    from openpyxl import load_workbook
 
     now_dt = datetime.now()
     today_str = now_dt.strftime("%Y-%m-%d")
-    rows = []
+
+    # Summary sheet data (tanpa kolom Status)
+    summary_rows = []
     for zone_id, zone_data in WORKSTATION_ZONES.items():
         zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
         person_id = zone_ownership.get(zone_id)
         if person_id and person_id in worker_data:
             w = worker_data[person_id]
-            rows.append({
+            summary_rows.append({
                 "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "Camera": cam_idx,
                 "Zone": zone_name,
                 "Working Time": format_time(w['working_time']),
                 "Idle Time": format_time(w['idle_time']),
-                "Away Time": format_time(w['away_time']),
+                "Away Time": format_time(w['away_time'])
             })
         else:
-            rows.append({
+            summary_rows.append({
                 "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "Camera": cam_idx,
                 "Zone": zone_name,
                 "Working Time": "0s",
                 "Idle Time": "0s",
-                "Away Time": "0s",
+                "Away Time": "0s"
             })
-    df_new = pd.DataFrame(rows)
 
-    if not os.path.isfile(filename):
-        df_new.to_excel(filename, index=False)
-    else:
-        df_old = pd.read_excel(filename)
-        # Cek tanggal pada baris terakhir
-        if not df_old.empty:
-            last_date = str(df_old.iloc[-1]["Timestamp"])[:10]
-        else:
-            last_date = None
-        if last_date == today_str:
-            # Update baris yang ada (replace semua data hari ini)
-            # Filter baris yang bukan hari ini
-            df_old = df_old[df_old["Timestamp"].str[:10] != today_str]
-            df_result = pd.concat([df_old, df_new], ignore_index=True)
-            df_result.to_excel(filename, index=False)
-        else:
-            # Hari baru, tambah baris baru
-            df_result = pd.concat([df_old, df_new], ignore_index=True)
-            df_result.to_excel(filename, index=False)
+    # Log data - berdasarkan flag bukan status
+    log_rows = []
+    for zone_id, zone_data in WORKSTATION_ZONES.items():
+        zone_name = zone_data[4] if len(zone_data) > 4 else f"Zone {zone_id}"
+        person_id = zone_ownership.get(zone_id)
+        if person_id and person_id in worker_data:
+            data = worker_data[person_id]
+            
+            # Check untuk log "Left Zone"
+            if data.get("just_left_zone", False):
+                log_rows.append({
+                    "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Camera": cam_idx,
+                    "Zone": zone_name,
+                    "Event": "Left Zone",
+                    "Last Seen": datetime.fromtimestamp(data.get("left_zone_time", time.time())).strftime("%Y-%m-%d %H:%M:%S"),
+                    "Status Change": "working → away"
+                })
+                # Reset flag setelah dicatat
+                data["just_left_zone"] = False
+                
+            # Check untuk log "Returned to Zone"
+            if data.get("just_returned_zone", False):
+                log_rows.append({
+                    "Timestamp": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Camera": cam_idx,
+                    "Zone": zone_name,
+                    "Event": "Returned to Zone",
+                    "Last Seen": datetime.fromtimestamp(data.get("returned_zone_time", time.time())).strftime("%Y-%m-%d %H:%M:%S"),
+                    "Status Change": "away → working"
+                })
+                # Reset flag setelah dicatat
+                data["just_returned_zone"] = False
 
+    df_summary = pd.DataFrame(summary_rows)
+    df_log = pd.DataFrame(log_rows)
+
+    try:
+        if not os.path.isfile(filename):
+            # Create new file with both sheets
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                df_summary.to_excel(writer, sheet_name='Summary', index=False)
+                df_log.to_excel(writer, sheet_name='Logs', index=False)
+        else:
+            # Load existing logs if file exists
+            try:
+                existing_logs = pd.read_excel(filename, sheet_name='Logs', engine='openpyxl')
+                df_log = pd.concat([existing_logs, df_log], ignore_index=True)
+            except:
+                pass
+
+            # Write both sheets to file
+            with pd.ExcelWriter(filename, engine='openpyxl', mode='w') as writer:
+                df_summary.to_excel(writer, sheet_name='Summary', index=False)
+                df_log.to_excel(writer, sheet_name='Logs', index=False)
+
+        print(f"[INFO] Successfully updated Excel file at {now_dt.strftime('%H:%M:%S')}")
+    except Exception as e:
+        print(f"[ERROR] Failed to update Excel file: {str(e)}")
 # =========================
 # Tracking Function
 # =========================
@@ -246,7 +296,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     SHOULDER_KEYPOINTS = [5, 6]
     HEAD_KEYPOINT = 0
     HIP_KEYPOINTS = [11, 12]
-    ACTIVITY_THRESHOLD = 8
+    ACTIVITY_THRESHOLD = 5
     IDLE_TIMEOUT = 3
     AWAY_TIMEOUT = 5
     VISIBILITY_THRESHOLD = 0.5
@@ -297,8 +347,8 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 fps_display = 10 / elapsed
             fps_timer = current_time
 
-        draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_time)
-        results = model.track(frame, conf=0.2, persist=True, verbose=False)
+        draw_zones(frame, WORKSTATION_ZONES, worker_data, zone_ownership, format_time, AWAY_TIMEOUT)
+        results = model.track(frame, conf=0.4, persist=True, verbose=False)
         active_persons = set()
 
         for result in results:
@@ -354,7 +404,14 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         "last_activity_score": 0,
                         "center": center,
                         "zone_id": zone_id,
-                        "track_ids": {track_id}
+                        "track_ids": {track_id},
+                        "previous_status": "working",
+                        "status_change_time": current_time,
+                        "was_in_zone": True,  # Track apakah sebelumnya di zona
+                        "just_left_zone": False,  # Flag untuk log left zone
+                        "just_returned_zone": False,  # Flag untuk log returned zone
+                        "left_zone_time": current_time,
+                        "returned_zone_time": current_time,
                     }
                 else:
                     worker_data[person_id]["track_ids"].add(track_id)
@@ -374,22 +431,29 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 time_delta = current_time - data["last_update"]
                 if work_active and not break_active:
                     if not in_zone:
-                        if data["status"] != "away":
-                            if current_time - data["last_update"] > AWAY_TIMEOUT:
-                                data["status"] = "away"
+                        # Jika baru keluar zona
+                        if data.get("was_in_zone", True):
+                            data["just_left_zone"] = True
+                            data["left_zone_time"] = current_time
+                            data["was_in_zone"] = False
+                        
+                        data["status"] = "away"
                         data["away_time"] += time_delta
-                    else:
+                    else:  # Dalam zone
+                        # Jika baru kembali ke zona
+                        if not data.get("was_in_zone", True):
+                            data["just_returned_zone"] = True
+                            data["returned_zone_time"] = current_time
+                            data["was_in_zone"] = True
+                        
+                        # Cek aktivitas
                         if activity_score > ACTIVITY_THRESHOLD:
-                            if data["status"] != "working":
-                                data["status"] = "working"
-                                if data.get("was_away"):
-                                    data["was_away"] = False
+                            data["status"] = "working"
                             data["working_time"] += time_delta
                             data["last_activity_time"] = current_time
                         else:
                             if current_time - data["last_activity_time"] > IDLE_TIMEOUT:
-                                if data["status"] == "working":
-                                    data["status"] = "idle"
+                                data["status"] = "idle"
                                 data["idle_time"] += time_delta
                             else:
                                 data["working_time"] += time_delta
@@ -408,22 +472,38 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 data["last_update"] = current_time
 
         total_workers = len(worker_data)
-        working = sum(1 for w in worker_data.values() if w["status"] == "working")
-        idle = sum(1 for w in worker_data.values() if w["status"] == "idle")
-        away = sum(1 for w in worker_data.values() if w["status"] == "away")
 
+                # Create black overlay on right side
+        # overlay = frame.copy()
+        # overlay_width = frame.shape[1]  # Full width overlay
+        # cv2.rectangle(overlay, 
+        #              (0, 5),  # Start from left
+        #              (frame.shape[1], 100),  # Full width to right edge
+        #              (0, 0, 0), -1)
+        # cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        
         overlay = frame.copy()
-        cv2.rectangle(overlay, (5, 5), (450, 100), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        overlay_width = frame.shape[1] // 2  # Half of frame width
+        cv2.rectangle(overlay, 
+                     (0, 30),               # Start from left edge, 30px from top
+                     (overlay_width, 110),   # Half width, height to cover all text
+                     (0, 0, 0), -1)
+        # Apply transparency
+        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)  # 30% overlay opacity
+        
+        
+        # Draw text on overlay - align from left
         now_dt = datetime.now()
         timestamp_str = now_dt.strftime("%H:%M:%S")
-        cv2.putText(frame, f"Camera {cam_idx} [{timestamp_str}]", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-        cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(WORKSTATION_ZONES)}", (10, 35),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(frame, f"Working: {working}  |  Idle: {idle}  |  Away: {away}", (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", (10, 85),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        x_pos = 10  # Start text from left edge
+        
+        cv2.putText(frame, f"Camera {cam_idx} [{timestamp_str}]", 
+                   (x_pos, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        cv2.putText(frame, f"Workers: {total_workers} | Zones: {len(WORKSTATION_ZONES)}", 
+                   (x_pos, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        cv2.putText(frame, f"FPS: {fps_display:.2f} (Video: {fps:.2f})", 
+                   (x_pos, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        
         
         out.write(frame)
 
