@@ -273,7 +273,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     print(f"🔌 Connecting to video source: {VIDEO_SOURCE}")
     print(f"⏱️ Away Timeout: {config_away_timeout} minutes ({AWAY_TIMEOUT} seconds)")
     print(f"🔄 Log Return Threshold: {LOG_RETURN_THRESHOLD} seconds")
-    print(f"📋 Sequential Logging: Return only after Left has been logged")
 
     model = YOLO("yolov8n-pose.pt")
     worker_data = {}
@@ -390,7 +389,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         "was_in_zone": True,
                         "consecutive_in_zone_time": 0,
                         "can_log_return": False,
-                        "last_left_log_time": None,  # NEW: Track kapan terakhir log "Left Zone"
+                        "last_left_log_time": None,
                     }
                 else:
                     worker_data[person_id]["track_ids"].add(track_id)
@@ -430,10 +429,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         data["away_time"] += time_delta
                         
                     else:  # Person dalam zona
-                        # PERBAIKAN: Reset status away jika masuk zona
+                        # Reset status away jika masuk zona
                         if data["status"] == "away":
-                            data["status"] = "working"  # Reset dari away ke working
-                            print(f"[DEBUG] {zone_name}: Status changed from away to working")
+                            data["status"] = "working"
                         
                         # Update in-zone tracking
                         if data["in_zone_start_time"] is None:
@@ -442,13 +440,9 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                             data["consecutive_in_zone_time"] = 0
                             data["was_in_zone"] = True
                             
-                            # PENTING: Cek apakah sudah pernah log "Left Zone" sebelumnya
+                            # Cek apakah sudah pernah log "Left Zone" sebelumnya
                             if data["left_zone_logged"] and not data["returned_zone_logged"]:
                                 data["can_log_return"] = True
-                                print(f"[DEBUG] {zone_name}: Person returned to zone, can_log_return set to True")
-                            
-                            print(f"[DEBUG] {zone_name}: Started in-zone tracking")
-                            print(f"[DEBUG] {zone_name}: Flags - can_log_return: {data['can_log_return']}, left_logged: {data['left_zone_logged']}, returned_logged: {data['returned_zone_logged']}")
                         else:
                             # Masih dalam zona, tambah waktu consecutive
                             data["consecutive_in_zone_time"] = current_time - data["in_zone_start_time"]
@@ -466,38 +460,13 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                                 data["status"] = "working"
                                 data["working_time"] += time_delta
                         
-                        # ENHANCED DEBUGGING untuk log "Returned to Zone"
-                        debug_info = {
-                            'returned_logged': data["returned_zone_logged"],
-                            'can_log_return': data["can_log_return"],
-                            'left_logged': data["left_zone_logged"],
-                            'consecutive_time': data["consecutive_in_zone_time"],
-                            'threshold': LOG_RETURN_THRESHOLD,
-                            'status': data["status"],
-                            'in_working_idle': data["status"] in ["working", "idle"],
-                            'last_left_time': data.get("last_left_log_time")
-                        }
-                        
-                        # Print debug setiap 3 detik untuk melihat progress
-                        if frame_count % 90 == 0:  # Sekitar 3 detik pada 30 FPS
-                            print(f"[DEBUG] {zone_name} Detailed Status: {debug_info}")
-                        
-                        # Log "Returned to Zone" dengan kondisi yang lebih jelas
+                        # Log "Returned to Zone" 
                         can_log_conditions = [
                             not data["returned_zone_logged"],  # Belum pernah log return
                             data["can_log_return"],            # Sudah pernah log "Left Zone"
                             data["consecutive_in_zone_time"] >= LOG_RETURN_THRESHOLD,  # Sudah stabil 15 detik
                             data["status"] in ["working", "idle"]  # Status working/idle
                         ]
-                        
-                        # Debug kondisi individual jika threshold tercapai
-                        if data["consecutive_in_zone_time"] >= LOG_RETURN_THRESHOLD and not data["returned_zone_logged"]:
-                            print(f"[DEBUG] {zone_name} Conditions Check:")
-                            print(f"  - Not returned_logged: {not data['returned_zone_logged']}")
-                            print(f"  - Can log return: {data['can_log_return']}")
-                            print(f"  - Time >= threshold: {data['consecutive_in_zone_time']:.1f} >= {LOG_RETURN_THRESHOLD}")
-                            print(f"  - Status working/idle: {data['status']} in ['working', 'idle'] = {data['status'] in ['working', 'idle']}")
-                            print(f"  - ALL CONDITIONS MET: {all(can_log_conditions)}")
                         
                         if all(can_log_conditions):
                             log_activity_to_db(
@@ -514,7 +483,7 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                 data["last_update"] = current_time
                 data["center"] = center
 
-        # Handle persons not currently detected - PERBAIKAN UTAMA
+        # Handle persons not currently detected
         current_time = time.time()
         for person_id, data in worker_data.items():
             if person_id not in active_persons:
@@ -527,7 +496,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                     if data["status"] != "away":
                         # Person sudah tidak terdeteksi lebih dari AWAY_TIMEOUT
                         data["status"] = "away"
-                        # JANGAN reset flags yang sudah ada
                         data["was_in_zone"] = False
                     
                     data["away_time"] += current_time - data["last_update"]
@@ -546,18 +514,17 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                         data["last_left_log_time"] = current_time  # Track waktu log
                         away_minutes = (current_time - data["last_seen"]) / 60
                         print(f"[LOG] {zone_name}: Left Zone after {away_minutes:.1f} minutes away")
-                        print(f"[DEBUG] {zone_name}: can_log_return set to True, returned_zone_logged reset to False")
                 
                 data["last_update"] = current_time
 
-        # Display info dengan debugging tambahan
+        # Display info
         total_workers = len(worker_data)
 
         overlay = frame.copy()
         overlay_width = frame.shape[1] // 2
         cv2.rectangle(overlay, 
                      (0, 30),
-                     (overlay_width, 150),  # Tinggi diperbesar untuk debug info
+                     (overlay_width, 130),
                      (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
         
@@ -571,8 +538,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
                    (x_pos, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
         cv2.putText(frame, f"FPS: {fps_display:.2f} | Away Timeout: {config_away_timeout}m", 
                    (x_pos, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-        cv2.putText(frame, f"Return Threshold: {LOG_RETURN_THRESHOLD}s", 
-                   (x_pos, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
         
         out.write(frame)
 
@@ -599,11 +564,10 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
     save_hourly_summary_to_db(db_manager, cam_idx, WORKSTATION_ZONES, zone_ownership, worker_data)
     db_manager.close()
     
-    # Print summary dengan debug info tambahan
+    # Print summary
     print(f"\nCamera {cam_idx} Summary:")
     print(f"Away Timeout : {config_away_timeout} minutes")
     print(f"Log Return Threshold: {LOG_RETURN_THRESHOLD} seconds")
-    print(f"Sequential Logging: Enabled")
     print(f"Total Worker : {total_workers}")
     print(f"Total Zone   : {len(WORKSTATION_ZONES)}")
     for zone_id, zone_data in WORKSTATION_ZONES.items():
@@ -615,12 +579,6 @@ def run_tracking(cam_idx, VIDEO_SOURCE, WORKSTATION_ZONES, break_times, work_sta
             print(f"  Working Time: {format_time(w['working_time'])}")
             print(f"  Idle Time   : {format_time(w['idle_time'])}")
             print(f"  Away Time   : {format_time(w['away_time'])}")
-            print(f"  Can Log Return: {w.get('can_log_return', False)}")
-            print(f"  Left Zone Logged: {w.get('left_zone_logged', False)}")
-            print(f"  Returned Zone Logged: {w.get('returned_zone_logged', False)}")
-            if w.get('last_left_log_time'):
-                left_time = datetime.fromtimestamp(w['last_left_log_time']).strftime("%H:%M:%S")
-                print(f"  Last Left Log Time: {left_time}")
         else:
             print(f"Zone {zone_name}:")
             print(f"  Working Time: 0s")
@@ -651,7 +609,6 @@ if __name__ == "__main__":
         work_start = cam_config.get("work_start", "")
         work_end = cam_config.get("work_end", "")
         overtime = cam_config.get("overtime", [])
-        # away_timeout akan diambil langsung dari cam_config di dalam run_tracking
         
         p = multiprocessing.Process(target=run_tracking, args=(idx, src, zones, breaks, work_start, work_end, overtime, frame_queue))
         p.start()
