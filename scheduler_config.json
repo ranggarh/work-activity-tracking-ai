@@ -1,0 +1,19 @@
+{
+  "pc_list": [
+    {
+      "pc_id": 1,
+      "name": "PC-1",
+      "ip": "192.168.2.223",
+      "port": 9999,
+      "cameras": [
+        {
+          "name": "Camera 1",
+          "source": "1105 V2.mp4",
+          "camera_id": 1,
+          "config_ref": 1
+        }
+      ],
+      "camera_count": 1
+    }
+  ]
+}

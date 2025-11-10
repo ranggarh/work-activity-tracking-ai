@@ -22,16 +22,20 @@ with open("config.json") as f:
 # Helper Functions
 # =========================
 
-def frame_server(frame_queue, host='localhost', port=9999):
+def frame_server(frame_queue, host='0.0.0.0', port=9999, pc_id=1):
+    """
+    Modified frame server to include PC ID and handle multiple clients
+    """
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((host, port))
-    server_socket.listen(1)
-    print(f"[FrameServer] Listening on {host}:{port}")
-    while True:
-        print("[FrameServer] Waiting for client connection...")
-        conn, addr = server_socket.accept()
-        print(f"[FrameServer] Client connected: {addr}")
-
+    server_socket.listen(5)  # Allow multiple connections
+    print(f"[FrameServer PC-{pc_id}] Listening on {host}:{port}")
+    
+    clients = []
+    
+    def handle_client(conn, addr):
+        print(f"[FrameServer PC-{pc_id}] Client connected: {addr}")
         # Flush frame_queue to avoid sending old frames
         try:
             while not frame_queue.empty():
@@ -43,15 +47,30 @@ def frame_server(frame_queue, host='localhost', port=9999):
             while True:
                 try:
                     cam_idx, frame_rgb = frame_queue.get(timeout=1)
-                    data = pickle.dumps((cam_idx, frame_rgb))
+                    # PERBAIKAN: Kirim cam_idx asli tanpa formatting!
+                    print(f"[FrameServer PC-{pc_id}] Sending cam_idx={cam_idx} (type: {type(cam_idx)})")
+                    data = pickle.dumps((cam_idx, frame_rgb))  # cam_idx = 1, 2, 3, dst (integer!)
                     msg = struct.pack("Q", len(data)) + data
                     conn.sendall(msg)
                 except queue.Empty:
                     continue
         except Exception as e:
-            print(f"[FrameServer] Error: {e}")
+            print(f"[FrameServer PC-{pc_id}] Client {addr} error: {e}")
+        finally:
             conn.close()
-    server_socket.close()
+            if conn in clients:
+                clients.remove(conn)
+
+    try:
+        while True:
+            conn, addr = server_socket.accept()
+            clients.append(conn)
+            thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+            thread.start()
+    except Exception as e:
+        print(f"[FrameServer PC-{pc_id}] Server error: {e}")
+    finally:
+        server_socket.close()
 
 def format_time(seconds):
     minutes = int(seconds // 60)
@@ -597,11 +616,20 @@ def terminate_all(jobs):
 # =========================
 
 if __name__ == "__main__":
+    # Read PC configuration
+    PC_ID = config.get("pc_id", 1)  # Default PC ID = 1
+    SERVER_PORT = config.get("server_port", 9999)  # Default port
+    
     VIDEO_SOURCES = config["video_sources"]
-    frame_queue = multiprocessing.Queue(maxsize=30)
+    frame_queue = multiprocessing.Queue(maxsize=50)
     jobs = []
-    server_thread = threading.Thread(target=frame_server, args=(frame_queue,), daemon=True)
+    
+    # Start frame server with PC ID
+    server_thread = threading.Thread(target=frame_server, args=(frame_queue, '0.0.0.0', SERVER_PORT, PC_ID), daemon=True)
     server_thread.start()
+    
+    print(f"\n🖥️  Starting PC-{PC_ID} with {len(VIDEO_SOURCES)} cameras")
+    print(f"📡 Frame server running on port {SERVER_PORT}")
     
     for idx, (src, cam_config) in enumerate(VIDEO_SOURCES, start=1):
         zones = cam_config.get("zones", {})
@@ -615,7 +643,7 @@ if __name__ == "__main__":
         jobs.append(p)
 
     def signal_handler(sig, frame):
-        print("Ctrl+C detected, terminating all processes...")
+        print(f"Ctrl+C detected, terminating PC-{PC_ID} processes...")
         terminate_all(jobs)
         exit(0)
 
